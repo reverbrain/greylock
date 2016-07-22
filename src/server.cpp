@@ -1,6 +1,8 @@
+#include "greylock/database.hpp"
 #include "greylock/error.hpp"
 #include "greylock/json.hpp"
 #include "greylock/jsonvalue.hpp"
+#include "greylock/types.hpp"
 
 #include <unistd.h>
 #include <signal.h>
@@ -13,17 +15,6 @@
 #include <ribosome/timer.hpp>
 
 #include <swarm/logger.hpp>
-
-#pragma GCC diagnostic push 
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#include <rocksdb/db.h>
-#include <rocksdb/filter_policy.h>
-#include <rocksdb/options.h>
-#include <rocksdb/status.h>
-#include <rocksdb/slice.h>
-#include <rocksdb/table.h>
-#include <rocksdb/utilities/transaction_db.h>
-#pragma GCC diagnostic pop
 
 #include <msgpack.hpp>
 
@@ -40,135 +31,16 @@
 
 using namespace ioremap;
 
-typedef int pos_t;
-
-struct token {
-	std::string name;
-	std::vector<pos_t> positions;
-
-	token(const std::string &name): name(name) {}
-	void insert_position(pos_t pos) {
-		positions.push_back(pos);
-	}
-
-	std::string key;
-};
-
-struct attribute {
-	std::string name;
-	std::vector<token> tokens;
-
-	attribute(const std::string &name): name(name) {}
-	void insert(const std::string &tname, pos_t pos) {
-		auto it = std::find_if(tokens.begin(), tokens.end(), [&](const token &t) {
-					return t.name == tname;
-				});
-		if (it == tokens.end()) {
-			token t(tname);
-			t.insert_position(pos);
-			tokens.emplace_back(t);
-			return;
-		}
-
-		it->insert_position(pos);
-	}
-};
-
-struct indexes {
-	std::vector<attribute> attributes;
-};
-
-struct document {
-	typedef uint64_t id_t;
-
-	std::string mbox;
-	struct timespec ts;
-
-	std::string data;
-	std::string id;
-
-	id_t indexed_id;
-
-	indexes idx;
-};
-
-
-struct greylock_options {
-	size_t toknes_shard_size = 4096;
-	long transaction_expiration = 60000; // 60 seconds
-	long transaction_lock_timeout = 60000; // 60 seconds
-
-	// if zero, sync metadata after each update
-	// if negative, only sync at database close (server stop)
-	// if positive, sync every @sync_metadata_timeout milliseconds
-	int sync_metadata_timeout = 60000;
-	
-	std::string document_prefix;
-	std::string metadata_key;
-
-	greylock_options():
-		document_prefix("documents."),
-		metadata_key("greylock.meta.key")
-	{
-	}
-};
-
-
-struct greylock_metadata {
-	std::map<std::string, document::id_t> ids;
-	document::id_t document_index;
-
-	std::map<std::string, size_t> token_shards;
-
-	MSGPACK_DEFINE(ids, document_index, token_shards);
-
-	bool dirty = false;
-
-	void insert(const greylock_options &options, document &doc) {
-		for (auto &attr: doc.idx.attributes) {
-			for (auto &t: attr.tokens) {
-				char ckey[doc.mbox.size() + attr.name.size() + t.name.size() + 3 + 17];
-
-				size_t csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s",
-						doc.mbox.c_str(), attr.name.c_str(), t.name.c_str());
-				size_t shard_number = 0;
-				std::string prefix(ckey, csize);
-				auto it = token_shards.find(prefix);
-				if (it == token_shards.end()) {
-					token_shards[prefix] = 0;
-				} else {
-					shard_number = ++it->second / options.toknes_shard_size;
-				}
-
-				csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s.%ld",
-						doc.mbox.c_str(), attr.name.c_str(), t.name.c_str(), shard_number);
-				t.key.assign(ckey, csize);
-				dirty = true;
-			}
-		}
-
-		auto it = ids.find(doc.id);
-		if (it == ids.end()) {
-			doc.indexed_id = document_index++;
-		}
-	}
-
-	std::string serialize() {
-		std::stringstream buffer;
-		msgpack::pack(buffer, *this);
-		buffer.seekg(0);
-		return buffer.str();
-	}
-};
-
 class http_server : public thevoid::server<http_server>
 {
 public:
 	virtual ~http_server() {
 		m_expiration_timer.stop();
 
-		sync_metadata(NULL);
-		delete m_db;
+		if (db().db) {
+			db().sync_metadata(NULL);
+			ILOG_INFO("Synced metadata, key: %s", db().opts.metadata_key.c_str());
+		}
 	}
 	virtual bool initialize(const rapidjson::Value &config) {
 		if (!rocksdb_init(config))
@@ -192,13 +64,13 @@ public:
 		return true;
 	}
 
-	const greylock_options &options() const {
-		return m_greylock_options;
+	const greylock::options &options() const {
+		return m_db.opts;
 	}
 
-	greylock::error_info meta_insert(document &doc) {
+	greylock::error_info meta_insert(greylock::document &doc) {
 		std::lock_guard<std::mutex> guard(m_lock);
-		m_greylock_metadata.insert(options(), doc);
+		db().meta.insert(options(), doc);
 		return greylock::error_info();
 	}
 
@@ -340,32 +212,18 @@ public:
 	};
 
 	struct on_index : public thevoid::simple_request_stream<http_server> {
-		struct disk_index {
-			std::set<std::string> ids;
-
-			MSGPACK_DEFINE(ids);
-		};
-
-		void merge_document(const rocksdb::Slice &old_value, const document &doc, std::string *new_data) {
-			struct disk_index index;
+		void merge_document(const rocksdb::Slice &old_value, const greylock::document &doc, std::string *new_data) {
+			struct greylock::disk_index index;
 
 			if (old_value.size()) {
-				msgpack::unpacked msg;
-				msgpack::unpack(&msg, old_value.data(), old_value.size());
-
-				msg.get().convert(&index);
+				index.deserialize(old_value.data(), old_value.size());
 			}
 
-			index.ids.insert(doc.id);
-
-			std::stringstream buffer;
-			msgpack::pack(buffer, index);
-			buffer.seekg(0);
-
-			new_data->assign(buffer.str());
+			index.ids.insert(doc.indexed_id);
+			new_data->assign(index.serialize());
 		}
 
-		greylock::error_info store_document(document &doc) {
+		greylock::error_info store_document(greylock::document &doc) {
 			auto err = server()->meta_insert(doc);
 			if (err)
 				return err;
@@ -384,18 +242,16 @@ public:
 			rocksdb::TransactionOptions to;
 			to.expiration = server()->options().transaction_expiration;
 			to.lock_timeout = server()->options().transaction_lock_timeout;
-			rocksdb::Transaction* tx = server()->db()->BeginTransaction(wo, to);
+			rocksdb::Transaction* tx = server()->db().db->BeginTransaction(wo, to);
 			std::unique_ptr<rocksdb::Transaction> txn_ptr(tx);
 
 			rocksdb::Status s;
 
-			if (doc.data.size()) {
-				std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
-				s = tx->Put(rocksdb::Slice(dkey), rocksdb::Slice(doc.data));
-				if (!s.ok()) {
-					return greylock::create_error(-s.code(), "could not write document id: %s, key: %s, error: %s",
-							doc.id.c_str(), dkey.c_str(), s.ToString().c_str());
-				}
+			std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
+			s = tx->Put(rocksdb::Slice(dkey), rocksdb::Slice(doc.serialize()));
+			if (!s.ok()) {
+				return greylock::create_error(-s.code(), "could not write document id: %s, key: %s, error: %s",
+						doc.id.c_str(), dkey.c_str(), s.ToString().c_str());
 			}
 
 			for (const auto &ckey: keys) {
@@ -417,10 +273,11 @@ public:
 				}
 			}
 			if (server()->options().sync_metadata_timeout == 0) {
-				err = server()->sync_metadata(tx);
+				err = server()->db().sync_metadata(tx);
 				if (err) {
 					return err;
 				}
+				ILOG_INFO("Synced metadata, key: %s", server()->db().opts.metadata_key.c_str());
 			}
 
 			s = tx->Commit();
@@ -434,7 +291,7 @@ public:
 			return greylock::error_info();
 		}
 
-		greylock::error_info process_one_document(document &doc) {
+		greylock::error_info process_one_document(greylock::document &doc) {
 			return store_document(doc);
 		}
 
@@ -469,7 +326,7 @@ public:
 				}
 
 
-				document doc;
+				greylock::document doc;
 				doc.mbox = mbox;
 				doc.ts = ts;
 
@@ -545,8 +402,8 @@ public:
 		}
 	};
 
-	indexes get_indexes(const rapidjson::Value &idxs) {
-		indexes ireq;
+	greylock::indexes get_indexes(const rapidjson::Value &idxs) {
+		greylock::indexes ireq;
 
 		if (!idxs.IsObject())
 			return ireq;
@@ -559,7 +416,7 @@ public:
 			if (!avalue.IsString())
 				continue;
 
-			attribute a(aname);
+			greylock::attribute a(aname);
 
 			std::vector<ribosome::lstring> indexes = spl.convert_split_words(avalue.GetString(), avalue.GetStringLength());
 			for (size_t pos = 0; pos < indexes.size(); ++pos) {
@@ -572,48 +429,20 @@ public:
 		return ireq;
 	}
 
-	rocksdb::TransactionDB *db() {
+	greylock::database &db() {
 		return m_db;
 	}
 
-	greylock::error_info sync_metadata(rocksdb::Transaction* tx) {
-		rocksdb::Status s;
-
-		if (!m_greylock_metadata.dirty)
-			return greylock::error_info();
-
-		if (tx) {
-			s = tx->Put(rocksdb::Slice(options().metadata_key),
-					rocksdb::Slice(m_greylock_metadata.serialize()));
-		} else {
-			s = m_db->Put(rocksdb::WriteOptions(),
-					rocksdb::Slice(options().metadata_key),
-					rocksdb::Slice(m_greylock_metadata.serialize()));
-		}
-
-		if (!s.ok()) {
-			return greylock::create_error(-s.code(), "could not write metadata key: %s, error: %s",
-					options().metadata_key.c_str(), s.ToString().c_str());
-		}
-
-		ILOG_INFO("Synced metadata, key: %s", options().metadata_key.c_str());
-		m_greylock_metadata.dirty = false;
-		return greylock::error_info();
-	}
-
-
 private:
 	std::mutex m_lock;
-	greylock_options m_greylock_options;
-	greylock_metadata m_greylock_metadata;
-
-	rocksdb::TransactionDB *m_db;
+	greylock::database m_db;
 
 	ribosome::expiration m_expiration_timer;
 
 	void sync_metadata_callback() {
-		if (m_greylock_metadata.dirty) {
-			sync_metadata(NULL);
+		if (db().meta.dirty) {
+			db().sync_metadata(NULL);
+			ILOG_INFO("Synced metadata, key: %s", db().opts.metadata_key.c_str());
 		}
 
 		auto expires_at = std::chrono::system_clock::now() +
@@ -634,42 +463,10 @@ private:
 			return false;
 		}
 
-		rocksdb::TransactionDBOptions tdb_options;
-
-		rocksdb::Options options;
-		options.max_open_files = 1000;
-
-		options.create_if_missing = true;
-		options.create_missing_column_families = true;
-
-		//options.prefix_extractor.reset(NewFixedPrefixTransform(3));
-		//options.memtable_prefix_bloom_bits = 100000000;
-		//options.memtable_prefix_bloom_probes = 6;
-
-		rocksdb::BlockBasedTableOptions table_options;
-		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
-		options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-
-		rocksdb::Status s = rocksdb::TransactionDB::Open(options, tdb_options, path, &m_db);
-		if (!s.ok()) {
-			ILOG_ERROR("failed to open rocksdb database: '%s', error: %s [%d]",
-					path, s.ToString().c_str(), s.code());
+		auto err = m_db.open(path);
+		if (err) {
+			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;
-		}
-
-		std::string meta;
-		s = m_db->Get(rocksdb::ReadOptions(), this->options().metadata_key, &meta);
-		if (!s.ok() && !s.IsNotFound()) {
-			ILOG_ERROR("failed to read metadata key: '%s', error: %s [%d]",
-					this->options().metadata_key, s.ToString().c_str(), s.code());
-			return false;
-		}
-
-		if (s.ok()) {
-			msgpack::unpacked msg;
-			msgpack::unpack(&msg, meta.data(), meta.size());
-
-			msg.get().convert(&m_greylock_metadata);
 		}
 
 		if (this->options().sync_metadata_timeout > 0) {
