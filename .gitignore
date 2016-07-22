@@ -1,0 +1,14 @@
+*.a
+*.o
+*.py[co]
+*.so
+*.so.*
+*.tar.gz
+.*.sw*
+*~
+CMakeCache.txt
+CMakeFiles
+build
+cmake_install.cmake
+install_manifest.txt
+tags
