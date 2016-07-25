@@ -93,10 +93,6 @@ public:
 
 		*new_value = serialize(index);
 
-		rocksdb::Log(logger, "merge: key: %s, index: entries: %ld, size: %ld\n",
-			key.ToString().c_str(), index.ids.size(), new_value->size());
-
-
 		return true;
 	}
 
