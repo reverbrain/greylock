@@ -90,7 +90,7 @@ struct database {
 
 		rocksdb::Options dbo;
 		dbo.max_open_files = 1000;
-		//dbo.disableDataSync = false;
+		dbo.disableDataSync = true;
 
 		dbo.compression = rocksdb::kLZ4HCCompression;
 
