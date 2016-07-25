@@ -212,17 +212,6 @@ public:
 	};
 
 	struct on_index : public thevoid::simple_request_stream<http_server> {
-		void merge_document(const rocksdb::Slice &old_value, const greylock::document &doc, std::string *new_data) {
-			struct greylock::disk_index index;
-
-			if (old_value.size()) {
-				deserialize(index, old_value.data(), old_value.size());
-			}
-
-			index.ids.insert(doc.indexed_id);
-			new_data->assign(serialize(index));
-		}
-
 		greylock::error_info store_document(greylock::document &doc) {
 			auto err = server()->meta_insert(doc);
 			if (err)
@@ -237,54 +226,35 @@ public:
 			}
 
 			auto wo = rocksdb::WriteOptions();
-			auto ro = rocksdb::ReadOptions();
-
-			rocksdb::TransactionOptions to;
-			to.expiration = server()->options().transaction_expiration;
-			to.lock_timeout = server()->options().transaction_lock_timeout;
-			rocksdb::Transaction* tx = server()->db().db->BeginTransaction(wo, to);
-			std::unique_ptr<rocksdb::Transaction> txn_ptr(tx);
 
 			rocksdb::Status s;
 
+			rocksdb::Slice doc_value(serialize(doc));
+
+			greylock::document_for_index did;
+			did.indexed_id = doc.indexed_id;
+			rocksdb::Slice doc_indexed_value(serialize(did));
+
+			rocksdb::WriteBatch batch;
+
 			std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
-			s = tx->Put(rocksdb::Slice(dkey), rocksdb::Slice(serialize(doc)));
-			if (!s.ok()) {
-				return greylock::create_error(-s.code(), "could not write document id: %s, key: %s, error: %s",
-						doc.id.c_str(), dkey.c_str(), s.ToString().c_str());
-			}
+			batch.Put(rocksdb::Slice(dkey), doc_value);
 
 			for (const auto &ckey: keys) {
-				auto key = rocksdb::Slice(ckey);
-
-				std::string old_data, new_data;
-				s = tx->GetForUpdate(ro, key, &old_data);
-				if (!s.ok() && !s.IsNotFound()) {
-					return greylock::create_error(-s.code(), "could not read index: %s, error: %s",
-							key.ToString().c_str(), s.ToString().c_str());
-				}
-
-				merge_document(old_data, doc, &new_data);
-				s = tx->Put(key, rocksdb::Slice(new_data));
-
-				if (!s.ok()) {
-					return greylock::create_error(-s.code(), "could not write index: %s, error: %s",
-							key.ToString().c_str(), s.ToString().c_str());
-				}
+				batch.Merge(rocksdb::Slice(ckey), doc_indexed_value);
 			}
 
 			if (server()->options().sync_metadata_timeout == 0) {
-				err = server()->db().sync_metadata(tx);
+				err = server()->db().sync_metadata(&batch);
 				if (err) {
 					return err;
 				}
-				ILOG_INFO("Synced metadata, key: %s", server()->db().opts.metadata_key.c_str());
 			}
 
-			s = tx->Commit();
+			s = server()->db().db->Write(wo, &batch);
 			if (!s.ok()) {
-				return greylock::create_error(-s.code(), "could not commit transaction for document: %s, error: %s",
-						doc.id.c_str(), s.ToString().c_str());
+				return greylock::create_error(-s.code(), "could not write index batch, mbox: %s, id: %s, error: %s",
+						doc.mbox.c_str(), doc.id.c_str(), s.ToString().c_str());
 			}
 
 			ILOG_INFO("index: successfully committed transaction: mbox: %s, id: %s, keys: %d",
