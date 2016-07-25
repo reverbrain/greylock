@@ -63,7 +63,7 @@ public:
 		if (err)
 			return err;
 
-		doc->deserialize(doc_data.data(), doc_data.size());
+		deserialize(*doc, doc_data.data(), doc_data.size());
 		return greylock::error_info();
 	}
 
@@ -110,7 +110,7 @@ private:
 		}
 
 		try {
-			m_current.deserialize(data.data(), data.size());
+			deserialize(m_current, data.data(), data.size());
 
 			m_idx_current = m_current.ids.begin();
 			m_idx_end = m_current.ids.end();

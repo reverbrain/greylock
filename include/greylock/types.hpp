@@ -11,6 +11,29 @@
 
 namespace ioremap { namespace greylock {
 
+template <typename T>
+greylock::error_info deserialize(T &t, const char *data, size_t size) {
+	try {
+		msgpack::unpacked msg;
+		msgpack::unpack(&msg, data, size);
+
+		msg.get().convert(&t);
+	} catch (const std::exception &e) {
+		return greylock::create_error(-EINVAL, "could not unpack data, size: %ld, error: %s",
+				size, e.what());
+	}
+
+	return greylock::error_info();
+}
+
+template <typename T>
+std::string serialize(const T &t) {
+	std::stringstream buffer;
+	msgpack::pack(buffer, t);
+	buffer.seekg(0);
+	return buffer.str();
+}
+
 typedef int pos_t;
 
 struct token {
@@ -52,7 +75,7 @@ struct indexes {
 struct document {
 	typedef uint64_t id_t;
 	enum {
-		serialize_version_1 = 1,
+		serialize_version_5 = 5,
 	};
 
 	std::string mbox;
@@ -61,14 +84,14 @@ struct document {
 	std::string data;
 	std::string id;
 
-	id_t indexed_id;
+	id_t indexed_id = 0;
 
 	indexes idx;
 
 	template <typename Stream>
 	void msgpack_pack(msgpack::packer<Stream> &o) const {
-		o.pack_array(5);
-		o.pack((int)document::serialize_version_1);
+		o.pack_array(document::serialize_version_5);
+		o.pack((int)document::serialize_version_5);
 		o.pack(data);
 		o.pack(id);
 		o.pack(ts.tv_sec);
@@ -88,8 +111,14 @@ struct document {
 		msgpack::object *p = o.via.array.ptr;
 		p[0].convert(&version);
 
+		if (version != (int)o.via.array.size) {
+			std::ostringstream ss;
+			ss << "could not unpack document, invalid version: " << version << ", array size: " << o.via.array.size;
+			throw std::runtime_error(ss.str());
+		}
+
 		switch (version) {
-		case document::serialize_version_1:
+		case document::serialize_version_5:
 			p[1].convert(&data);
 			p[2].convert(&id);
 			p[3].convert(&ts.tv_sec);
@@ -102,20 +131,11 @@ struct document {
 		}
 		}
 	}
+};
 
-	void deserialize(const char *data, size_t size) {
-		msgpack::unpacked msg;
-		msgpack::unpack(&msg, data, size);
-
-		msg.get().convert(this);
-	}
-
-	std::string serialize() {
-		std::stringstream buffer;
-		msgpack::pack(buffer, *this);
-		buffer.seekg(0);
-		return buffer.str();
-	}
+struct document_for_index {
+	document::id_t indexed_id;
+	MSGPACK_DEFINE(indexed_id);
 };
 
 struct disk_index {
@@ -126,20 +146,6 @@ struct disk_index {
 	std::set<document::id_t> ids;
 
 	MSGPACK_DEFINE(ids);
-
-	void deserialize(const char *data, size_t size) {
-		msgpack::unpacked msg;
-		msgpack::unpack(&msg, data, size);
-
-		msg.get().convert(this);
-	}
-
-	std::string serialize() {
-		std::stringstream buffer;
-		msgpack::pack(buffer, *this);
-		buffer.seekg(0);
-		return buffer.str();
-	}
 };
 
 struct options {
@@ -205,12 +211,12 @@ struct metadata {
 	}
 
 	enum {
-		serialize_version_1 = 1,
+		serialize_version_4 = 4,
 	};
 	template <typename Stream>
 	void msgpack_pack(msgpack::packer<Stream> &o) const {
-		o.pack_array(4);
-		o.pack((int)metadata::serialize_version_1);
+		o.pack_array(metadata::serialize_version_4);
+		o.pack((int)metadata::serialize_version_4);
 		o.pack(ids);
 		o.pack(document_index);
 		o.pack(token_shards);
@@ -229,8 +235,14 @@ struct metadata {
 		msgpack::object *p = o.via.array.ptr;
 		p[0].convert(&version);
 
+		if (version != (int)o.via.array.size) {
+			std::ostringstream ss;
+			ss << "could not unpack metadata, invalid version: " << version << ", array size: " << o.via.array.size;
+			throw std::runtime_error(ss.str());
+		}
+
 		switch (version) {
-		case metadata::serialize_version_1:
+		case metadata::serialize_version_4:
 			p[1].convert(&ids);
 			p[2].convert(&document_index);
 			p[3].convert(&token_shards);
@@ -241,21 +253,6 @@ struct metadata {
 			throw std::runtime_error(ss.str());
 		}
 		}
-	}
-
-
-	std::string serialize() {
-		std::stringstream buffer;
-		msgpack::pack(buffer, *this);
-		buffer.seekg(0);
-		return buffer.str();
-	}
-
-	void deserialize(const char *data, size_t size) {
-		msgpack::unpacked msg;
-		msgpack::unpack(&msg, data, size);
-
-		msg.get().convert(this);
 	}
 };
 
