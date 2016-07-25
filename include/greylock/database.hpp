@@ -26,7 +26,6 @@ struct read_only_database {
 	greylock::error_info open(const std::string &path) {
 		rocksdb::Options options;
 		options.max_open_files = 1000;
-		options.compression = rocksdb::kNoCompression;
 
 		rocksdb::BlockBasedTableOptions table_options;
 		table_options.block_cache = rocksdb::NewLRUCache(100 * 1048576); // 100MB of uncompresseed data cache
@@ -59,6 +58,13 @@ struct database {
 	options opts;
 	metadata meta;
 
+	~database() {
+		struct rocksdb::CompactRangeOptions opts;
+		opts.change_level = true;
+		opts.target_level = 0;
+		db->CompactRange(opts, NULL, NULL);
+	}
+
 	greylock::error_info sync_metadata(rocksdb::Transaction* tx) {
 		if (!meta.dirty)
 			return greylock::error_info();
@@ -84,8 +90,9 @@ struct database {
 
 		rocksdb::Options dbo;
 		dbo.max_open_files = 1000;
+		//dbo.disableDataSync = false;
 
-		dbo.compression = rocksdb::kLZ4Compression;
+		dbo.compression = rocksdb::kLZ4HCCompression;
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
