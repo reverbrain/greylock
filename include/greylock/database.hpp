@@ -105,23 +105,6 @@ public:
 			std::string* new_value,
 			rocksdb::Logger* logger) const {
 
-		auto dump = [&](const char *prefix, const rocksdb::Slice *v) {
-			std::cout << prefix << ": " << key.ToString() << ": ";
-			if (v) {
-				msgpack::unpacked msg;
-				msgpack::unpack(&msg, v->data(), v->size());
-
-				msgpack::object deserialized = msg.get();
-				std::cout << deserialized;
-			} else {
-				std::cout << "null";
-			}
-			std::cout << std::endl;
-		};
-
-		//dump("left", &left_operand);
-		//dump("right", &right_operand);
-
 		(void) key;
 		(void) left_operand;
 		(void) right_operand;
