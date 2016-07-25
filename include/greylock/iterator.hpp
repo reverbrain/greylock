@@ -20,8 +20,12 @@ public:
 	typedef std::ptrdiff_t difference_type;
 
 	static index_iterator begin(DBT &db, const std::string &key) {
+		return begin(db, key, 0);
+	}
+
+	static index_iterator begin(DBT &db, const std::string &key, size_t start) {
 		auto ret = index_iterator(db, key);
-		ret.set_current_shard_number(0);
+		ret.set_current_shard_number(start);
 		ret.load_next();
 
 		return ret;
