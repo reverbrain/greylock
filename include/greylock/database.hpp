@@ -8,6 +8,7 @@
 #include <rocksdb/cache.h>
 #include <rocksdb/db.h>
 #include <rocksdb/filter_policy.h>
+#include <rocksdb/merge_operator.h>
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/status.h>
@@ -16,6 +17,8 @@
 #pragma GCC diagnostic pop
 
 #include <memory>
+
+#include <iostream>
 
 namespace ioremap { namespace greylock {
 
@@ -53,8 +56,84 @@ struct read_only_database {
 	}
 };
 
+class disk_index_merge_operator : public rocksdb::MergeOperator {
+public:
+	virtual const char* Name() const override {
+		return "disk_index_merge_operator";
+	}
+
+	virtual bool FullMerge(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
+			const std::deque<std::string>& operand_list,
+			std::string* new_value,
+			rocksdb::Logger *logger) const override {
+
+		struct greylock::disk_index index;
+		greylock::error_info err;
+
+		if (old_value) {
+			err = deserialize(index, old_value->data(), old_value->size());
+			if (err) {
+				rocksdb::Error(logger, "merge: key: %s, index deserialize failed: %s [%d]",
+						key.ToString().c_str(), err.message().c_str(), err.code());
+				return false;
+			}
+		}
+
+		for (const auto& value : operand_list) {
+			document_for_index doc;
+			err = deserialize(doc, value.data(), value.size());
+			if (err) {
+				rocksdb::Error(logger, "merge: key: %s, document deserialize failed: %s [%d]",
+						key.ToString().c_str(), err.message().c_str(), err.code());
+				return false;
+			}
+
+			index.ids.insert(doc.indexed_id);
+		}
+
+		*new_value = serialize(index);
+
+		rocksdb::Log(logger, "merge: key: %s, index: entries: %ld, size: %ld\n",
+			key.ToString().c_str(), index.ids.size(), new_value->size());
+
+
+		return true;
+	}
+
+	virtual bool PartialMerge(const rocksdb::Slice& key,
+			const rocksdb::Slice& left_operand, const rocksdb::Slice& right_operand,
+			std::string* new_value,
+			rocksdb::Logger* logger) const {
+
+		auto dump = [&](const char *prefix, const rocksdb::Slice *v) {
+			std::cout << prefix << ": " << key.ToString() << ": ";
+			if (v) {
+				msgpack::unpacked msg;
+				msgpack::unpack(&msg, v->data(), v->size());
+
+				msgpack::object deserialized = msg.get();
+				std::cout << deserialized;
+			} else {
+				std::cout << "null";
+			}
+			std::cout << std::endl;
+		};
+
+		//dump("left", &left_operand);
+		//dump("right", &right_operand);
+
+		(void) key;
+		(void) left_operand;
+		(void) right_operand;
+		(void) new_value;
+		(void) logger;
+
+		return false;
+	}
+};
+
 struct database {
-	std::unique_ptr<rocksdb::TransactionDB> db;
+	std::unique_ptr<rocksdb::DB> db;
 	options opts;
 	metadata meta;
 
@@ -65,13 +144,13 @@ struct database {
 		db->CompactRange(opts, NULL, NULL);
 	}
 
-	greylock::error_info sync_metadata(rocksdb::Transaction* tx) {
+	greylock::error_info sync_metadata(rocksdb::WriteBatch *batch) {
 		if (!meta.dirty)
 			return greylock::error_info();
 
 		rocksdb::Status s;
-		if (tx) {
-			s = tx->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
+		if (batch) {
+			batch->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
 		} else {
 			s = db->Put(rocksdb::WriteOptions(), rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
 		}
@@ -86,16 +165,16 @@ struct database {
 	}
 
 	greylock::error_info open(const std::string &path) {
-		rocksdb::TransactionDBOptions tdbo;
-
 		rocksdb::Options dbo;
 		dbo.max_open_files = 1000;
-		dbo.disableDataSync = true;
+		//dbo.disableDataSync = true;
 
 		dbo.compression = rocksdb::kLZ4HCCompression;
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
+
+		dbo.merge_operator.reset(new disk_index_merge_operator);
 
 		//dbo.prefix_extractor.reset(NewFixedPrefixTransform(3));
 		//dbo.memtable_prefix_bloom_bits = 100000000;
@@ -106,9 +185,9 @@ struct database {
 		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(opts.bits_per_key, true));
 		dbo.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
 
-		rocksdb::TransactionDB *db;
+		rocksdb::DB *db;
 
-		rocksdb::Status s = rocksdb::TransactionDB::Open(dbo, tdbo, path, &db);
+		rocksdb::Status s = rocksdb::DB::Open(dbo, path, &db);
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
 					path.c_str(), s.ToString().c_str());
