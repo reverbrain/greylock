@@ -216,11 +216,11 @@ public:
 			struct greylock::disk_index index;
 
 			if (old_value.size()) {
-				index.deserialize(old_value.data(), old_value.size());
+				deserialize(index, old_value.data(), old_value.size());
 			}
 
 			index.ids.insert(doc.indexed_id);
-			new_data->assign(index.serialize());
+			new_data->assign(serialize(index));
 		}
 
 		greylock::error_info store_document(greylock::document &doc) {
@@ -248,7 +248,7 @@ public:
 			rocksdb::Status s;
 
 			std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
-			s = tx->Put(rocksdb::Slice(dkey), rocksdb::Slice(doc.serialize()));
+			s = tx->Put(rocksdb::Slice(dkey), rocksdb::Slice(serialize(doc)));
 			if (!s.ok()) {
 				return greylock::create_error(-s.code(), "could not write document id: %s, key: %s, error: %s",
 						doc.id.c_str(), dkey.c_str(), s.ToString().c_str());
@@ -272,6 +272,7 @@ public:
 							key.ToString().c_str(), s.ToString().c_str());
 				}
 			}
+
 			if (server()->options().sync_metadata_timeout == 0) {
 				err = server()->db().sync_metadata(tx);
 				if (err) {

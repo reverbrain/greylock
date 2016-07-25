@@ -71,9 +71,9 @@ struct database {
 
 		rocksdb::Status s;
 		if (tx) {
-			s = tx->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(meta.serialize()));
+			s = tx->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
 		} else {
-			s = db->Put(rocksdb::WriteOptions(), rocksdb::Slice(opts.metadata_key), rocksdb::Slice(meta.serialize()));
+			s = db->Put(rocksdb::WriteOptions(), rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
 		}
 
 		if (!s.ok()) {
@@ -122,13 +122,11 @@ struct database {
 					opts.metadata_key.c_str(), s.ToString().c_str());
 		}
 
-		try {
-			if (s.ok()) {
-				this->meta.deserialize(meta.data(), meta.size());
-			}
-		} catch (const std::exception &e) {
-			return greylock::create_error(-EINVAL, "could not unpack metadata, key: %s, size: %ld, error: %s",
-					opts.metadata_key.c_str(), meta.size(), e.what());
+		if (s.ok()) {
+			auto err = deserialize(this->meta, meta.data(), meta.size());
+			if (err)
+				return greylock::create_error(err.code(), "metadata deserialization failed, key: %s, error: %s",
+					opts.metadata_key.c_str(), err.message().c_str());
 		}
 
 		return greylock::error_info(); 
