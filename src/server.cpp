@@ -2,6 +2,7 @@
 #include "greylock/error.hpp"
 #include "greylock/json.hpp"
 #include "greylock/jsonvalue.hpp"
+#include "greylock/intersection.hpp"
 #include "greylock/types.hpp"
 
 #include <unistd.h>
@@ -84,9 +85,6 @@ public:
 	};
 
 	struct on_search : public thevoid::simple_request_stream<http_server> {
-		struct search_result {
-		};
-
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
 			ribosome::timer search_tm;
 
@@ -129,16 +127,15 @@ public:
 				return;
 			}
 
-			size_t page_num = ~0U;
-			std::string page_start("\0");
+			size_t shard_offset = 0;
+			size_t max_number = ~0UL;
+			size_t shard_number = 0;
 
 			if (doc.HasMember("paging")) {
 				const auto &pages = doc["paging"];
-				page_num = greylock::get_int64(pages, "num", ~0U);
-				page_start = greylock::get_string(pages, "start", "\0");
+				shard_offset = greylock::get_int64(pages, "shard_offset", 0);
+				max_number = greylock::get_int64(pages, "max_number", ~0UL);
 			}
-
-			auto ireq = server()->get_indexes(query);
 
 			const rapidjson::Value &match = greylock::get_object(doc, "match");
 			if (match.IsObject()) {
@@ -150,35 +147,39 @@ public:
 				}
 			}
 
-			search_result result;
+			auto ireq = server()->get_indexes(query);
+
+			greylock::search_result result;
+			greylock::intersector<greylock::database> inter(server()->db());
+			result = inter.intersect(mbox, ireq, shard_number, shard_offset, max_number);
 			send_search_result(result);
 
-			ILOG_INFO("search: attributes: %ld, page: num: %ld, start: %s, duration: %d ms",
+			ILOG_INFO("search: attributes: %ld, shard_number: %ld, shard_offset: %ld, max_number: %ld, "
+					"indexes: %ld, duration: %d ms",
 					ireq.attributes.size(),
-					page_num, page_start.c_str(),
+					shard_number, shard_offset, max_number, result.docs.size(),
 					search_tm.elapsed());
 		}
 
-		void send_search_result(const search_result &result) {
+		void send_search_result(const greylock::search_result &result) {
 			greylock::JsonValue ret;
 			auto &allocator = ret.GetAllocator();
-#if 0
+
 			rapidjson::Value ids(rapidjson::kArrayType);
 			for (auto it = result.docs.begin(), end = result.docs.end(); it != end; ++it) {
 				rapidjson::Value key(rapidjson::kObjectType);
 
-				const greylock::key &doc = it->doc;
+				const greylock::document &doc = it->doc;
 
 				rapidjson::Value idv(doc.id.c_str(), doc.id.size(), allocator);
 				key.AddMember("id", idv, allocator);
+				key.AddMember("indexed_id", doc.indexed_id, allocator);
 
 				key.AddMember("relevance", it->relevance, allocator);
 
 				rapidjson::Value ts(rapidjson::kObjectType);
-				long tsec, tnsec;
-				doc.get_timestamp(&tsec, &tnsec);
-				ts.AddMember("tsec", tsec, allocator);
-				ts.AddMember("tnsec", tnsec, allocator);
+				ts.AddMember("tsec", doc.ts.tv_sec, allocator);
+				ts.AddMember("tnsec", doc.ts.tv_nsec, allocator);
 				key.AddMember("timestamp", ts, allocator);
 
 				ids.PushBack(key, allocator);
@@ -187,19 +188,6 @@ public:
 			ret.AddMember("ids", ids, allocator);
 			ret.AddMember("completed", result.completed, allocator);
 
-			{
-				rapidjson::Value page(rapidjson::kObjectType);
-				page.AddMember("num", result.docs.size(), allocator);
-
-				rapidjson::Value sv(result.cookie.c_str(), result.cookie.size(), allocator);
-				page.AddMember("start", sv, allocator);
-
-				ret.AddMember("paging", page, allocator);
-			}
-#else
-			rapidjson::Value ids(rapidjson::kArrayType);
-			ret.AddMember("ids", ids, allocator);
-#endif
 			std::string data = ret.ToString();
 
 			thevoid::http_response reply;
@@ -229,17 +217,26 @@ public:
 
 			rocksdb::Status s;
 
-			rocksdb::Slice doc_value(serialize(doc));
+			std::string doc_serialized = serialize(doc);
+			rocksdb::Slice doc_value(doc_serialized);
 
 			greylock::document_for_index did;
 			did.indexed_id = doc.indexed_id;
-			rocksdb::Slice doc_indexed_value(serialize(did));
+			std::string did_serialized = serialize(did);
+			rocksdb::Slice doc_indexed_value(did_serialized);
 
 			rocksdb::WriteBatch batch;
 
 			std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
+#if 0
+			s = server()->db().db->Put(wo, rocksdb::Slice(dkey), doc_value);
+			if (!s.ok()) {
+				return greylock::create_error(-s.code(), "could not write document: %s, error: %s",
+					dkey.c_str(), s.ToString().c_str());
+			}
+#else
 			batch.Put(rocksdb::Slice(dkey), doc_value);
-
+#endif
 			for (const auto &ckey: keys) {
 				batch.Merge(rocksdb::Slice(ckey), doc_indexed_value);
 			}
@@ -257,8 +254,11 @@ public:
 						doc.mbox.c_str(), doc.id.c_str(), s.ToString().c_str());
 			}
 
-			ILOG_INFO("index: successfully committed transaction: mbox: %s, id: %s, keys: %d",
-					doc.mbox.c_str(), doc.id.c_str(), keys.size());
+			ILOG_INFO("index: successfully indexed document: mbox: %s, id: %s, "
+					"indexed_id: %ld, keys: %d, serialized_doc_size: %ld",
+					doc.mbox.c_str(), doc.id.c_str(), doc.indexed_id,
+					keys.size(),
+					doc_value.size());
 			return greylock::error_info();
 		}
 
