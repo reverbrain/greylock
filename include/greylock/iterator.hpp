@@ -24,25 +24,23 @@ public:
 	}
 
 	static index_iterator begin(DBT &db, const std::string &key, size_t start) {
-		auto ret = index_iterator(db, key);
-		ret.set_current_shard_number(start);
-		ret.load_next();
-
-		return ret;
+		return index_iterator(db, key, start);
 	}
 
 	static index_iterator end(DBT &db, const std::string &key) {
-		auto ret = index_iterator(db, key);
-		ret.set_current_shard_number(-1);
+		return index_iterator(db, key, -1);
+	}
 
-		return ret;
+	index_iterator(const index_iterator &src): m_db(src.m_db) {
+		m_current = src.m_current;
+		m_idx_current = m_current.ids.begin();
+		m_idx_end = m_current.ids.end();
+
+		m_key = src.m_key;
+		m_current_shard_number = src.m_current_shard_number;
 	}
 
 	self_type operator++() {
-		if (m_idx_current == m_idx_end) {
-			return *this;
-		}
-
 		++m_idx_current;
 		if (m_idx_current == m_idx_end) {
 			load_next();
@@ -67,11 +65,26 @@ public:
 		return greylock::error_info();
 	}
 
+	std::string to_string() const {
+		std::ostringstream ss;
+		ss << "key: " << m_key <<
+			", shard_number: " << m_current_shard_number <<
+			", ids_size: " << m_current.ids.size() <<
+			", is_end: " << (m_idx_current == m_idx_end) <<
+			", *current: " << *m_idx_current <<
+			", *end: " << *m_idx_end;
+		return ss.str();
+	}
+
 	bool operator==(const self_type& rhs) {
 		if (m_key != rhs.m_key)
 			return false;
 		if (m_current_shard_number != rhs.m_current_shard_number)
 			return false;
+
+		if ((m_idx_current == m_idx_end) && (rhs.m_idx_current == rhs.m_idx_end))
+			return true;
+
 		if (*m_idx_current != *rhs.m_idx_current)
 			return false;
 
@@ -86,9 +99,8 @@ private:
 	std::string m_key;
 	long m_current_shard_number = 0;
 
-	index_iterator(DBT &db, const std::string &key) : m_db(db), m_key(key) {
-		m_idx_current = m_current.ids.begin();
-		m_idx_end = m_current.ids.end();
+	index_iterator(DBT &db, const std::string &key, size_t shard_number): m_db(db), m_key(key), m_current_shard_number(shard_number) {
+		load_next();
 	}
 
 	void set_current_shard_number(long sn) {
@@ -100,6 +112,9 @@ private:
 		m_current.ids.clear();
 		m_idx_current = m_current.ids.begin();
 		m_idx_end = m_current.ids.end();
+
+		if (m_current_shard_number < 0)
+			return;
 
 		std::string key = m_key + "." + std::to_string(m_current_shard_number);
 		std::string data;
