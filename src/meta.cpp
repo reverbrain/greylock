@@ -100,7 +100,7 @@ int main(int argc, char *argv[])
 					end = greylock::index_iterator<greylock::read_only_database>::end(db, iname);
 					it != end;
 					++it) {
-				std::cout << "indexed_id: " << *it;
+				std::cout << "indexed_id: " << it->indexed_id;
 				if (dump) {
 					greylock::document doc;
 					err = it.document(&doc);

@@ -52,14 +52,18 @@ public:
 			options::methods("GET")
 		);
 
+		on<on_compact>(
+			options::exact_match("/compact"),
+			options::methods("POST", "PUT")
+		);
 		on<on_index>(
 			options::exact_match("/index"),
-			options::methods("POST")
+			options::methods("POST", "PUT")
 		);
 
 		on<on_search>(
 			options::exact_match("/search"),
-			options::methods("POST")
+			options::methods("POST", "PUT")
 		);
 
 		return true;
@@ -81,6 +85,15 @@ public:
 			(void) req;
 
 			this->send_reply(thevoid::http_response::ok);
+		}
+	};
+
+	struct on_compact : public thevoid::simple_request_stream<http_server> {
+		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
+			(void) req;
+			(void) buffer;
+
+			server()->db().compact();
 		}
 	};
 
@@ -152,7 +165,7 @@ public:
 			greylock::search_result result;
 			greylock::intersector<greylock::database> inter(server()->db());
 			result = inter.intersect(mbox, ireq, shard_number, shard_offset, max_number);
-			send_search_result(result);
+			send_search_result(mbox, result);
 
 			ILOG_INFO("search: attributes: %ld, shard_number: %ld, shard_offset: %ld, max_number: %ld, "
 					"indexes: %ld, duration: %d ms",
@@ -161,7 +174,29 @@ public:
 					search_tm.elapsed());
 		}
 
-		void send_search_result(const greylock::search_result &result) {
+		void pack_string_array(rapidjson::Value &parent, rapidjson::Document::AllocatorType &allocator,
+				const char *name, const std::vector<std::string> &data) {
+			rapidjson::Value arr(rapidjson::kArrayType);
+			for (const auto &s: data) {
+				rapidjson::Value v(s.c_str(), s.size(), allocator);
+				arr.PushBack(v, allocator);
+			}
+
+			parent.AddMember(name, arr, allocator);
+		}
+
+		template <typename T>
+		void pack_simple_array(rapidjson::Value &parent, rapidjson::Document::AllocatorType &allocator,
+				const char *name, const std::vector<T> &data) {
+			rapidjson::Value arr(rapidjson::kArrayType);
+			for (const auto &s: data) {
+				arr.PushBack(s, allocator);
+			}
+
+			parent.AddMember(name, arr, allocator);
+		}
+
+		void send_search_result(const std::string &mbox, const greylock::search_result &result) {
 			greylock::JsonValue ret;
 			auto &allocator = ret.GetAllocator();
 
@@ -174,6 +209,19 @@ public:
 				rapidjson::Value idv(doc.id.c_str(), doc.id.size(), allocator);
 				key.AddMember("id", idv, allocator);
 				key.AddMember("indexed_id", doc.indexed_id, allocator);
+
+				rapidjson::Value dv(doc.data.c_str(), doc.data.size(), allocator);
+				key.AddMember("data", dv, allocator);
+
+				rapidjson::Value av(doc.author.c_str(), doc.author.size(), allocator);
+				key.AddMember("author", av, allocator);
+
+				rapidjson::Value cv(rapidjson::kObjectType);
+				pack_string_array(cv, allocator, "content", doc.ctx.content);
+				pack_string_array(cv, allocator, "title", doc.ctx.title);
+				pack_string_array(cv, allocator, "links", doc.ctx.links);
+				pack_string_array(cv, allocator, "images", doc.ctx.images);
+				key.AddMember("content", cv, allocator);
 
 				key.AddMember("relevance", it->relevance, allocator);
 
@@ -188,6 +236,9 @@ public:
 			ret.AddMember("ids", ids, allocator);
 			ret.AddMember("completed", result.completed, allocator);
 
+			rapidjson::Value mbval(mbox.c_str(), mbox.size(), allocator);
+			ret.AddMember("mailbox", mbval, allocator);
+
 			std::string data = ret.ToString();
 
 			thevoid::http_response reply;
@@ -200,16 +251,19 @@ public:
 	};
 
 	struct on_index : public thevoid::simple_request_stream<http_server> {
-		greylock::error_info store_document(greylock::document &doc) {
+		greylock::error_info process_one_document(greylock::document &doc) {
 			auto err = server()->meta_insert(doc);
 			if (err)
 				return err;
 
 			// all keys accessible within transaction must be accessed in order, otherwise deadlock is possible
-			std::set<std::string> keys;
+			std::map<std::string, std::string> keys;
 			for (const auto &attr: doc.idx.attributes) {
 				for (const auto &t: attr.tokens) {
-					keys.insert(t.key);
+					greylock::document_for_index did;
+					did.indexed_id = doc.indexed_id;
+
+					keys[t.key] = serialize(did);
 				}
 			}
 
@@ -219,11 +273,6 @@ public:
 
 			std::string doc_serialized = serialize(doc);
 			rocksdb::Slice doc_value(doc_serialized);
-
-			greylock::document_for_index did;
-			did.indexed_id = doc.indexed_id;
-			std::string did_serialized = serialize(did);
-			rocksdb::Slice doc_indexed_value(did_serialized);
 
 			rocksdb::WriteBatch batch;
 
@@ -237,8 +286,8 @@ public:
 #else
 			batch.Put(rocksdb::Slice(dkey), doc_value);
 #endif
-			for (const auto &ckey: keys) {
-				batch.Merge(rocksdb::Slice(ckey), doc_indexed_value);
+			for (const auto &p: keys) {
+				batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(p.second));
 			}
 
 			if (server()->options().sync_metadata_timeout == 0) {
@@ -262,8 +311,26 @@ public:
 			return greylock::error_info();
 		}
 
-		greylock::error_info process_one_document(greylock::document &doc) {
-			return store_document(doc);
+		std::vector<std::string> get_string_vector(const rapidjson::Value &data, const char *name) {
+			std::vector<std::string> ret;
+			const auto &arr = greylock::get_array(data, name);
+			if (!arr.IsArray())
+				return ret;
+
+			for (auto it = arr.Begin(), end = arr.End(); it != end; it++) {
+				if (it->IsString())
+					ret.push_back(it->GetString());
+			}
+
+			return ret;
+		}
+		greylock::error_info parse_content(const rapidjson::Value &ctx, greylock::document &doc) {
+			doc.ctx.content = get_string_vector(ctx, "content");
+			doc.ctx.title = get_string_vector(ctx, "title");
+			doc.ctx.links = get_string_vector(ctx, "links");
+			doc.ctx.images = get_string_vector(ctx, "images");
+
+			return greylock::error_info();
 		}
 
 		greylock::error_info parse_docs(const std::string &mbox, const rapidjson::Value &docs) {
@@ -277,8 +344,9 @@ public:
 
 				const char *id = greylock::get_string(*it, "id");
 				const char *data = greylock::get_string(*it, "data");
+				const char *author = greylock::get_string(*it, "author");
 				if (!id) {
-					return greylock::create_error(-EINVAL, "docs/id must be strings");
+					return greylock::create_error(-EINVAL, "id must be string");
 				}
 
 				struct timespec ts;
@@ -304,6 +372,16 @@ public:
 				doc.id.assign(id);
 				if (data) {
 					doc.data.assign(data);
+				}
+				if (author) {
+					doc.author.assign(author);
+				}
+
+				const rapidjson::Value &ctx = greylock::get_object(*it, "content");
+				if (ctx.IsObject()) {
+					err = parse_content(ctx, doc);
+					if (err)
+						return err;
 				}
 
 				const rapidjson::Value &idxs = greylock::get_object(*it, "index");

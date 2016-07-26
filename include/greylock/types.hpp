@@ -74,17 +74,29 @@ struct indexes {
 	std::vector<attribute> attributes;
 };
 
+struct content {
+	std::vector<std::string> content;
+	std::vector<std::string> title;
+	std::vector<std::string> links;
+	std::vector<std::string> images;
+
+	MSGPACK_DEFINE(content, title, links, images);
+};
+
 struct document {
 	typedef uint64_t id_t;
 	enum {
-		serialize_version_5 = 5,
+		serialize_version_7 = 7,
 	};
 
 	std::string mbox;
 	struct timespec ts;
 
+	std::string author;
 	std::string data;
 	std::string id;
+
+	content ctx;
 
 	id_t indexed_id = 0;
 
@@ -92,9 +104,11 @@ struct document {
 
 	template <typename Stream>
 	void msgpack_pack(msgpack::packer<Stream> &o) const {
-		o.pack_array(document::serialize_version_5);
-		o.pack((int)document::serialize_version_5);
+		o.pack_array(document::serialize_version_7);
+		o.pack((int)document::serialize_version_7);
 		o.pack(data);
+		o.pack(author);
+		o.pack(ctx);
 		o.pack(id);
 		o.pack(ts.tv_sec);
 		o.pack(ts.tv_nsec);
@@ -120,11 +134,13 @@ struct document {
 		}
 
 		switch (version) {
-		case document::serialize_version_5:
+		case document::serialize_version_7:
 			p[1].convert(&data);
-			p[2].convert(&id);
-			p[3].convert(&ts.tv_sec);
-			p[4].convert(&ts.tv_nsec);
+			p[2].convert(&author);
+			p[3].convert(&ctx);
+			p[4].convert(&id);
+			p[5].convert(&ts.tv_sec);
+			p[6].convert(&ts.tv_nsec);
 			break;
 		default: {
 			std::ostringstream ss;
@@ -138,14 +154,18 @@ struct document {
 struct document_for_index {
 	document::id_t indexed_id;
 	MSGPACK_DEFINE(indexed_id);
+
+	bool operator<(const document_for_index &other) const {
+		return indexed_id < other.indexed_id;
+	}
 };
 
 struct disk_index {
-	typedef document::id_t value_type;
-	typedef document::id_t& reference;
-	typedef document::id_t* pointer;
+	typedef document_for_index value_type;
+	typedef document_for_index& reference;
+	typedef document_for_index* pointer;
 
-	std::set<document::id_t> ids;
+	std::set<document_for_index> ids;
 
 	MSGPACK_DEFINE(ids);
 };

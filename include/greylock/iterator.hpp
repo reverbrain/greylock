@@ -57,7 +57,7 @@ public:
 
 	error_info document(document *doc) {
 		std::string doc_data;
-		auto err = m_db.read(m_db.opts.document_prefix + std::to_string(*m_idx_current), &doc_data);
+		auto err = m_db.read(m_db.opts.document_prefix + std::to_string(m_idx_current->indexed_id), &doc_data);
 		if (err)
 			return err;
 
@@ -85,7 +85,7 @@ public:
 		if ((m_idx_current == m_idx_end) && (rhs.m_idx_current == rhs.m_idx_end))
 			return true;
 
-		if (*m_idx_current != *rhs.m_idx_current)
+		if (m_idx_current->indexed_id != rhs.m_idx_current->indexed_id)
 			return false;
 
 		return true;
