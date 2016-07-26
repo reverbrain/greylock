@@ -80,15 +80,15 @@ public:
 		}
 
 		for (const auto& value : operand_list) {
-			document_for_index doc;
-			err = deserialize(doc, value.data(), value.size());
+			document_for_index did;
+			err = deserialize(did, value.data(), value.size());
 			if (err) {
 				rocksdb::Error(logger, "merge: key: %s, document deserialize failed: %s [%d]",
 						key.ToString().c_str(), err.message().c_str(), err.code());
 				return false;
 			}
 
-			index.ids.insert(doc.indexed_id);
+			index.ids.insert(did);
 			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), doc.indexed_id);
 		}
 
@@ -131,6 +131,9 @@ struct database {
 	metadata meta;
 
 	~database() {
+	}
+
+	void compact() {
 		struct rocksdb::CompactRangeOptions opts;
 		opts.change_level = true;
 		opts.target_level = 0;
