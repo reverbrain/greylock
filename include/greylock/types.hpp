@@ -13,14 +13,16 @@ namespace ioremap { namespace greylock {
 
 template <typename T>
 greylock::error_info deserialize(T &t, const char *data, size_t size) {
+	msgpack::unpacked msg;
 	try {
-		msgpack::unpacked msg;
 		msgpack::unpack(&msg, data, size);
 
 		msg.get().convert(&t);
 	} catch (const std::exception &e) {
-		return greylock::create_error(-EINVAL, "could not unpack data, size: %ld, error: %s",
-				size, e.what());
+		std::ostringstream ss;
+		ss << msg.get();
+		return greylock::create_error(-EINVAL, "could not unpack data, size: %ld, value: %s, error: %s",
+				size, ss.str().c_str(), e.what());
 	}
 
 	return greylock::error_info();
@@ -207,6 +209,8 @@ struct metadata {
 		auto it = ids.find(doc.id);
 		if (it == ids.end()) {
 			doc.indexed_id = document_index++;
+		} else {
+			doc.indexed_id = it->second;
 		}
 	}
 
