@@ -35,9 +35,11 @@ int main(int argc, char *argv[])
 	std::string iname;
 	bool dump = false;
 	bool dump_data = false;
+	size_t indexed_id;
 	bpo::options_description gr("Greylock index options");
 	gr.add_options()
-		("index", bpo::value<std::string>(&iname)->required(), "index name")
+		("index", bpo::value<std::string>(&iname), "index name")
+		("indexed-id", bpo::value<size_t>(&indexed_id), "read document with this indexed ID")
 		("rocksdb", bpo::value<std::string>(&path)->required(),
 		 	"path to rocksdb, will be opened in read-only mode, safe to be called if different process is already using it")
 		("dump", "dump document meta (id, timestamp, data size) to stdout")
@@ -79,28 +81,59 @@ int main(int argc, char *argv[])
 			return err.code();
 		}
 
-		for (auto it = greylock::index_iterator<greylock::read_only_database>::begin(db, iname),
-				end = greylock::index_iterator<greylock::read_only_database>::end(db, iname);
-				it != end;
-				++it) {
-			std::cout << "indexed_id: " << *it;
-			if (dump) {
-				greylock::document doc;
-				err = it.document(&doc);
-				if (err) {
-					std::cout << ", error: " << err.message();
-				} else {
-					std::cout << ", id: " << doc.id <<
-						", ts: " << print_time(&doc.ts) <<
-						", data size: " << doc.data.size();
+		auto print_doc = [&](const greylock::document &doc) -> std::string {
+			std::ostringstream ss;
 
-					if (dump_data) {
-						std::cout << ", data: " << doc.data;
-					}
-				}
+			ss << ", id: " << doc.id <<
+				", ts: " << print_time(&doc.ts) <<
+				", data size: " << doc.data.size();
+
+			if (dump_data) {
+				ss << ", data: " << doc.data;
 			}
 
-			std::cout << std::endl;
+			return ss.str();
+		};
+
+		if (vm.count("index")) {
+			for (auto it = greylock::index_iterator<greylock::read_only_database>::begin(db, iname),
+					end = greylock::index_iterator<greylock::read_only_database>::end(db, iname);
+					it != end;
+					++it) {
+				std::cout << "indexed_id: " << *it;
+				if (dump) {
+					greylock::document doc;
+					err = it.document(&doc);
+					if (err) {
+						std::cout << ", error: " << err.message();
+					} else {
+						std::cout << print_doc(doc);
+					}
+				}
+
+				std::cout << std::endl;
+			}
+		}
+
+		if (vm.count("indexed-id")) {
+			std::string doc_data;
+			auto err = db.read(db.opts.document_prefix + std::to_string(indexed_id), &doc_data);
+			if (err) {
+				std::cout << "could not read document with indexed_id: " << indexed_id <<
+					", error: " << err.message() << std::endl;
+				return err.code();
+			}
+
+			greylock::document doc;
+			err = greylock::deserialize(doc, doc_data.data(), doc_data.size());
+			if (err) {
+				std::cout << "could not deserialize document with indexed_id: " << indexed_id <<
+					", data_size: " << doc_data.size() <<
+					", error: " << err.message() << std::endl;
+				return err.code();
+			}
+
+			std::cout << "doc: indexed_id: " << indexed_id << print_doc(doc) << std::endl;
 		}
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
