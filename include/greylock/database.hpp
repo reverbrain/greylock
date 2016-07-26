@@ -89,6 +89,7 @@ public:
 			}
 
 			index.ids.insert(doc.indexed_id);
+			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), doc.indexed_id);
 		}
 
 		*new_value = serialize(index);
@@ -100,7 +101,20 @@ public:
 			const rocksdb::Slice& left_operand, const rocksdb::Slice& right_operand,
 			std::string* new_value,
 			rocksdb::Logger* logger) const {
+#if 0
+		auto dump = [](const rocksdb::Slice &v) {
+			std::ostringstream ss;
 
+			msgpack::unpacked msg;
+			msgpack::unpack(&msg, v.data(), v.size());
+
+			ss << msg.get();
+			return ss.str();
+		};
+
+		printf("partial merge: key: %s, left: %s, right: %s\n",
+				key.ToString().c_str(), dump(left_operand).c_str(), dump(right_operand).c_str());
+#endif
 		(void) key;
 		(void) left_operand;
 		(void) right_operand;
@@ -127,11 +141,13 @@ struct database {
 		if (!meta.dirty)
 			return greylock::error_info();
 
+		std::string meta_serialized = serialize(meta);
+
 		rocksdb::Status s;
 		if (batch) {
-			batch->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
+			batch->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(meta_serialized));
 		} else {
-			s = db->Put(rocksdb::WriteOptions(), rocksdb::Slice(opts.metadata_key), rocksdb::Slice(serialize(meta)));
+			s = db->Put(rocksdb::WriteOptions(), rocksdb::Slice(opts.metadata_key), rocksdb::Slice(meta_serialized));
 		}
 
 		if (!s.ok()) {
