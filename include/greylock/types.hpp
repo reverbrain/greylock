@@ -42,12 +42,24 @@ struct token {
 	std::string name;
 	std::vector<pos_t> positions;
 
+	std::string shard_key;
+	std::set<size_t> shards;
+
 	token(const std::string &name): name(name) {}
 	void insert_position(pos_t pos) {
 		positions.push_back(pos);
 	}
 
 	std::string key;
+};
+
+struct token_disk {
+	std::vector<size_t> shards;
+	MSGPACK_DEFINE(shards);
+
+	token_disk() {}
+	token_disk(const std::set<size_t> &s): shards(s.begin(), s.end()) {}
+	token_disk(const std::vector<size_t> &s): shards(s) {}
 };
 
 struct attribute {
@@ -171,7 +183,7 @@ struct disk_index {
 };
 
 struct options {
-	size_t toknes_shard_size = 10000;
+	size_t tokens_shard_size = 10000;
 	long transaction_expiration = 60000; // 60 seconds
 	long transaction_lock_timeout = 60000; // 60 seconds
 
@@ -184,12 +196,22 @@ struct options {
 
 	long lru_cache_size = 100 * 1024 * 1024; // 100 MB of uncompressed data cache
 
+	// mininmum size of the token which will go into separate index,
+	// if token size is smaller, it will be combined into 2 indexes
+	// with the previous and next tokens.
+	// This options greatly speeds up requests with small words (like [to be or not to be]),
+	// but heavily increases index size.
+	unsigned int ngram_index_size = 3;
 	
 	std::string document_prefix;
+	std::string token_shard_prefix;
+	std::string index_prefix;
 	std::string metadata_key;
 
 	options():
 		document_prefix("documents."),
+		token_shard_prefix("token_shards."),
+		index_prefix("index."),
 		metadata_key("greylock.meta.key")
 	{
 	}
@@ -199,38 +221,61 @@ struct metadata {
 	std::map<std::string, document::id_t> ids;
 	document::id_t document_index;
 
-	std::map<std::string, size_t> token_shards;
-
 	bool dirty = false;
 
+	static std::string generate_index_base(const options &options,
+			const std::string &mbox, const std::string &attr, const std::string &token) {
+		char ckey[mbox.size() + attr.size() + token.size() + 3 + 17];
+		size_t csize = snprintf(ckey, sizeof(ckey), "%s%s.%s.%s",
+				options.index_prefix.c_str(),
+				mbox.c_str(), attr.c_str(), token.c_str());
+
+		return std::string(ckey, csize);
+	}
+
+	static std::string generate_index_key_shard_number(const std::string &base, size_t sn) {
+		char ckey[base.size() + 17];
+		size_t csize = snprintf(ckey, sizeof(ckey), "%s.%ld", base.c_str(), sn);
+
+		return std::string(ckey, csize);
+	}
+	static std::string generate_index_key(const options &options, const std::string &base, const document::id_t &indexed_id) {
+		size_t shard_number = indexed_id / options.tokens_shard_size;
+		return generate_index_key_shard_number(base, shard_number);
+	}
+	static std::string generate_index_key(const options &options,
+			const std::string &mbox, const std::string &attr, const std::string &token,
+			const document::id_t &indexed_id) {
+		std::string base = generate_index_base(options, mbox, attr, token);
+		return generate_index_key(options, base, indexed_id);
+	}
+
+	static std::string generate_shard_key(const options &options,
+			const std::string &mbox, const std::string &attr, const std::string &token) {
+		char ckey[options.token_shard_prefix.size() + mbox.size() + attr.size() + token.size() + 5];
+		size_t csize = snprintf(ckey, sizeof(ckey), "%s%s.%s.%s",
+				options.token_shard_prefix.c_str(),
+				mbox.c_str(), attr.c_str(), token.c_str());
+
+		return std::string(ckey, csize);
+	}
+
 	void insert(const options &options, document &doc) {
-		for (auto &attr: doc.idx.attributes) {
-			for (auto &t: attr.tokens) {
-				char ckey[doc.mbox.size() + attr.name.size() + t.name.size() + 3 + 17];
-
-				size_t csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s",
-						doc.mbox.c_str(), attr.name.c_str(), t.name.c_str());
-				size_t shard_number = 0;
-				std::string prefix(ckey, csize);
-				auto it = token_shards.find(prefix);
-				if (it == token_shards.end()) {
-					token_shards[prefix] = 0;
-				} else {
-					shard_number = ++it->second / options.toknes_shard_size;
-				}
-
-				csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s.%ld",
-						doc.mbox.c_str(), attr.name.c_str(), t.name.c_str(), shard_number);
-				t.key.assign(ckey, csize);
-				dirty = true;
-			}
-		}
-
 		auto it = ids.find(doc.id);
 		if (it == ids.end()) {
 			doc.indexed_id = document_index++;
 		} else {
 			doc.indexed_id = it->second;
+		}
+
+		for (auto &attr: doc.idx.attributes) {
+			for (auto &t: attr.tokens) {
+				t.key = generate_index_key(options, doc.mbox, attr.name, t.name, doc.indexed_id);
+				t.shard_key = generate_shard_key(options, doc.mbox, attr.name, t.name);
+
+				size_t shard_number = doc.indexed_id / options.tokens_shard_size;
+				t.shards.insert(shard_number);
+			}
 		}
 	}
 
@@ -243,7 +288,7 @@ struct metadata {
 		o.pack((int)metadata::serialize_version_4);
 		o.pack(ids);
 		o.pack(document_index);
-		o.pack(token_shards);
+		//o.pack(token_shards);
 	}
 
 	void msgpack_unpack(msgpack::object o) {
@@ -269,7 +314,7 @@ struct metadata {
 		case metadata::serialize_version_4:
 			p[1].convert(&ids);
 			p[2].convert(&document_index);
-			p[3].convert(&token_shards);
+			//p[3].convert(&token_shards);
 			break;
 		default: {
 			std::ostringstream ss;

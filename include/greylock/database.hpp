@@ -22,50 +22,16 @@
 
 namespace ioremap { namespace greylock {
 
-struct read_only_database {
-	std::unique_ptr<rocksdb::DB> db;
-	options opts;
-
-	greylock::error_info open(const std::string &path) {
-		rocksdb::Options options;
-		options.max_open_files = 1000;
-
-		rocksdb::BlockBasedTableOptions table_options;
-		table_options.block_cache = rocksdb::NewLRUCache(100 * 1048576); // 100MB of uncompresseed data cache
-		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
-		options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-
-		rocksdb::DB *db;
-
-		rocksdb::Status s = rocksdb::DB::OpenForReadOnly(options, path, &db);
-		if (!s.ok()) {
-			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
-					path.c_str(), s.ToString().c_str());
-		}
-		this->db.reset(db);
-
-		return greylock::error_info(); 
-	}
-
-	greylock::error_info read(const std::string &key, std::string *ret) {
-		auto s = db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
-		if (!s.ok()) {
-			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
-		}
-		return greylock::error_info();
-	}
-};
-
 class disk_index_merge_operator : public rocksdb::MergeOperator {
 public:
 	virtual const char* Name() const override {
 		return "disk_index_merge_operator";
 	}
 
-	virtual bool FullMerge(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
+	bool merge_index(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
 			const std::deque<std::string>& operand_list,
 			std::string* new_value,
-			rocksdb::Logger *logger) const override {
+			rocksdb::Logger *logger) const {
 
 		struct greylock::disk_index index;
 		greylock::error_info err;
@@ -97,6 +63,68 @@ public:
 		return true;
 	}
 
+	template <typename T>
+	std::string dump_iterable(const T &iter) const {
+		std::ostringstream ss;
+		for (auto it = iter.begin(), end = iter.end(); it != end; ++it) {
+			if (it != iter.begin())
+				ss << " ";
+			ss << *it;
+		}
+		return ss.str();
+	}
+	bool merge_token_shards(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
+			const std::deque<std::string>& operand_list,
+			std::string* new_value,
+			rocksdb::Logger *logger) const {
+
+		struct greylock::token_disk td;
+		std::set<size_t> shards;
+		greylock::error_info err;
+
+		if (old_value) {
+			err = deserialize(td, old_value->data(), old_value->size());
+			if (err) {
+				rocksdb::Error(logger, "merge: key: %s, token_disk deserialize failed: %s [%d]",
+						key.ToString().c_str(), err.message().c_str(), err.code());
+				return false;
+			}
+
+			shards.insert(td.shards.begin(), td.shards.end());
+		}
+
+		for (const auto& value : operand_list) {
+			token_disk s;
+			err = deserialize(s, value.data(), value.size());
+			if (err) {
+				rocksdb::Error(logger, "merge: key: %s, token_disk operand deserialize failed: %s [%d]",
+						key.ToString().c_str(), err.message().c_str(), err.code());
+				return false;
+			}
+
+			shards.insert(s.shards.begin(), s.shards.end());
+		}
+
+		td.shards = std::vector<size_t>(shards.begin(), shards.end());
+		*new_value = serialize(td);
+
+		return true;
+	}
+
+	virtual bool FullMerge(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
+			const std::deque<std::string>& operand_list,
+			std::string* new_value,
+			rocksdb::Logger *logger) const override {
+		if (key.starts_with(rocksdb::Slice("token_shards."))) {
+			return merge_token_shards(key, old_value, operand_list, new_value, logger);
+		}
+		if (key.starts_with(rocksdb::Slice("index."))) {
+			return merge_index(key, old_value, operand_list, new_value, logger);
+		}
+
+		return false;
+	}
+
 	virtual bool PartialMerge(const rocksdb::Slice& key,
 			const rocksdb::Slice& left_operand, const rocksdb::Slice& right_operand,
 			std::string* new_value,
@@ -124,6 +152,59 @@ public:
 		return false;
 	}
 };
+
+struct read_only_database {
+	std::unique_ptr<rocksdb::DB> db;
+	options opts;
+
+	greylock::error_info open(const std::string &path) {
+		rocksdb::Options options;
+		options.max_open_files = 1000;
+		options.merge_operator.reset(new disk_index_merge_operator);
+
+		rocksdb::BlockBasedTableOptions table_options;
+		table_options.block_cache = rocksdb::NewLRUCache(100 * 1048576); // 100MB of uncompresseed data cache
+		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
+		options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
+
+		rocksdb::DB *db;
+
+		rocksdb::Status s = rocksdb::DB::OpenForReadOnly(options, path, &db);
+		if (!s.ok()) {
+			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
+					path.c_str(), s.ToString().c_str());
+		}
+		this->db.reset(db);
+
+		return greylock::error_info();
+	}
+
+	greylock::error_info read(const std::string &key, std::string *ret) {
+		auto s = db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
+		if (!s.ok()) {
+			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
+		}
+		return greylock::error_info();
+	}
+
+	std::vector<size_t> get_shards(const std::string &key) {
+		token_disk td;
+
+		std::string ser_shards;
+		auto err = read(key, &ser_shards);
+		if (err) {
+			//printf("could not read shards, key: %s, err: %s [%d]\n", key.c_str(), err.message().c_str(), err.code());
+			return td.shards;
+		}
+
+		err = deserialize(td, ser_shards.data(), ser_shards.size());
+		if (err)
+			return td.shards;
+
+		return td.shards;
+	}
+};
+
 
 struct database {
 	std::unique_ptr<rocksdb::DB> db;
@@ -207,6 +288,21 @@ struct database {
 		}
 
 		return greylock::error_info(); 
+	}
+
+	std::vector<size_t> get_shards(const std::string &key) {
+		token_disk td;
+
+		std::string ser_shards;
+		auto err = read(key, &ser_shards);
+		if (err)
+			return td.shards;
+
+		err = deserialize(td, ser_shards.data(), ser_shards.size());
+		if (err)
+			return td.shards;
+
+		return td.shards;
 	}
 
 	greylock::error_info read(const std::string &key, std::string *ret) {

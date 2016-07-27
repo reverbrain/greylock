@@ -19,16 +19,22 @@ public:
 	typedef std::forward_iterator_tag iterator_category;
 	typedef std::ptrdiff_t difference_type;
 
-	static index_iterator begin(DBT &db, const std::string &key) {
-		return begin(db, key, 0);
+	static index_iterator begin(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token) {
+		std::string index_base = metadata::generate_index_base(db.opts, mbox, attr, token);
+		std::vector<size_t> shards(db.get_shards(metadata::generate_shard_key(db.opts, mbox, attr, token)));
+		if (shards.size() == 0) {
+			return end(db, index_base);
+		}
+
+		return index_iterator(db, index_base, shards);
 	}
 
-	static index_iterator begin(DBT &db, const std::string &key, size_t start) {
-		return index_iterator(db, key, start);
+	static index_iterator end(DBT &db, const std::string &base) {
+		return index_iterator(db, base);
 	}
-
-	static index_iterator end(DBT &db, const std::string &key) {
-		return index_iterator(db, key, -1);
+	static index_iterator end(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token) {
+		std::string index_base = metadata::generate_index_base(db.opts, mbox, attr, token);
+		return index_iterator(db, index_base);
 	}
 
 	index_iterator(const index_iterator &src): m_db(src.m_db) {
@@ -36,8 +42,9 @@ public:
 		m_idx_current = m_current.ids.begin();
 		m_idx_end = m_current.ids.end();
 
-		m_key = src.m_key;
-		m_current_shard_number = src.m_current_shard_number;
+		m_base = src.m_base;
+		m_shards = src.m_shards;
+		m_shards_idx = src.m_shards_idx;
 	}
 
 	self_type operator++() {
@@ -66,20 +73,32 @@ public:
 	}
 
 	std::string to_string() const {
+		auto dump_shards = [&]() -> std::string {
+			std::ostringstream out;
+			for (size_t i = 0; i < m_shards.size(); ++i) {
+				out << m_shards[i];
+				if (i != m_shards.size() - 1)
+					out << " ";
+			}
+			return out.str();
+		};
 		std::ostringstream ss;
-		ss << "key: " << m_key <<
-			", shard_number: " << m_current_shard_number <<
+		ss << "base: " << m_base <<
+			", shard_number: " << m_shards_idx <<
+			", shards: [" << dump_shards() << "] " <<
 			", ids_size: " << m_current.ids.size() <<
-			", is_end: " << (m_idx_current == m_idx_end) <<
-			", *current: " << *m_idx_current <<
-			", *end: " << *m_idx_end;
+			", is_end: " << (m_idx_current == m_idx_end);
 		return ss.str();
 	}
 
 	bool operator==(const self_type& rhs) {
-		if (m_key != rhs.m_key)
+		if (m_base != rhs.m_base)
 			return false;
-		if (m_current_shard_number != rhs.m_current_shard_number)
+		if (m_shards.size() != rhs.m_shards.size())
+			return false;
+		if (m_shards != rhs.m_shards)
+			return false;
+		if (m_shards_idx != rhs.m_shards_idx)
 			return false;
 
 		if ((m_idx_current == m_idx_end) && (rhs.m_idx_current == rhs.m_idx_end))
@@ -96,15 +115,23 @@ public:
 
 private:
 	DBT &m_db;
-	std::string m_key;
-	long m_current_shard_number = 0;
+	std::string m_base;
+	std::vector<size_t> m_shards;
+	int m_shards_idx = -1;
 
-	index_iterator(DBT &db, const std::string &key, size_t shard_number): m_db(db), m_key(key), m_current_shard_number(shard_number) {
+	index_iterator(DBT &db, const std::string &base): m_db(db), m_base(base) {
+	}
+
+	index_iterator(DBT &db, const std::string &base, const std::vector<size_t> shards): m_db(db), m_base(base), m_shards(shards) {
+		set_shard_index(0);
 		load_next();
 	}
 
-	void set_current_shard_number(long sn) {
-		m_current_shard_number = sn;
+	void set_shard_index(int idx) {
+		m_shards_idx = idx;
+		if (idx < 0) {
+			m_shards.clear();
+		}
 	}
 
 
@@ -113,14 +140,16 @@ private:
 		m_idx_current = m_current.ids.begin();
 		m_idx_end = m_current.ids.end();
 
-		if (m_current_shard_number < 0)
+		if (m_shards_idx < 0 || m_shards_idx >= (int)m_shards.size()) {
+			set_shard_index(-1);
 			return;
+		}
 
-		std::string key = m_key + "." + std::to_string(m_current_shard_number);
+		std::string key = metadata::generate_index_key_shard_number(m_base, m_shards[m_shards_idx]);
 		std::string data;
 		auto err = m_db.read(key, &data);
 		if (err) {
-			set_current_shard_number(-1);
+			set_shard_index(-1);
 			return;
 		}
 
@@ -130,11 +159,11 @@ private:
 			m_idx_current = m_current.ids.begin();
 			m_idx_end = m_current.ids.end();
 		} catch (...) {
-			set_current_shard_number(-1);
+			set_shard_index(-1);
 			return;
 		}
 
-		set_current_shard_number(m_current_shard_number + 1);
+		set_shard_index(m_shards_idx + 1);
 	}
 };
 }} // namespace ioremap::greylock

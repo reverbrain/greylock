@@ -143,7 +143,6 @@ public:
 
 			size_t shard_offset = 0;
 			size_t max_number = ~0UL;
-			size_t shard_number = 0;
 
 			if (doc.HasMember("paging")) {
 				const auto &pages = doc["paging"];
@@ -165,13 +164,13 @@ public:
 
 			greylock::search_result result;
 			greylock::intersector<greylock::database> inter(server()->db());
-			result = inter.intersect(mbox, ireq, shard_number, shard_offset, max_number);
+			result = inter.intersect(mbox, ireq, shard_offset, max_number);
 			send_search_result(mbox, result);
 
-			ILOG_INFO("search: attributes: %ld, shard_number: %ld, shard_offset: %ld, max_number: %ld, "
+			ILOG_INFO("search: attributes: %ld, shard_offset: %ld, max_number: %ld, "
 					"indexes: %ld, duration: %d ms",
 					ireq.attributes.size(),
-					shard_number, shard_offset, max_number, result.docs.size(),
+					shard_offset, max_number, result.docs.size(),
 					search_tm.elapsed());
 		}
 
@@ -257,39 +256,33 @@ public:
 			if (err)
 				return err;
 
-			// all keys accessible within transaction must be accessed in order, otherwise deadlock is possible
-			std::map<std::string, std::string> keys;
-			for (const auto &attr: doc.idx.attributes) {
-				for (const auto &t: attr.tokens) {
-					greylock::document_for_index did;
-					did.indexed_id = doc.indexed_id;
-
-					keys[t.key] = serialize(did);
-				}
-			}
-
 			auto wo = rocksdb::WriteOptions();
-
+			rocksdb::WriteBatch batch;
 			rocksdb::Status s;
 
 			std::string doc_serialized = serialize(doc);
 			rocksdb::Slice doc_value(doc_serialized);
 
-			rocksdb::WriteBatch batch;
+			greylock::document_for_index did;
+			did.indexed_id = doc.indexed_id;
+			std::string sdid = serialize(did);
+
+			size_t indexes = 0;
+			for (const auto &attr: doc.idx.attributes) {
+				for (const auto &t: attr.tokens) {
+					batch.Merge(rocksdb::Slice(t.key), rocksdb::Slice(sdid));
+
+					greylock::token_disk td(t.shards);
+					std::string tds = serialize(td);
+
+					batch.Merge(rocksdb::Slice(t.shard_key), rocksdb::Slice(tds));
+
+					indexes++;
+				}
+			}
 
 			std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
-#if 0
-			s = server()->db().db->Put(wo, rocksdb::Slice(dkey), doc_value);
-			if (!s.ok()) {
-				return greylock::create_error(-s.code(), "could not write document: %s, error: %s",
-					dkey.c_str(), s.ToString().c_str());
-			}
-#else
 			batch.Put(rocksdb::Slice(dkey), doc_value);
-#endif
-			for (const auto &p: keys) {
-				batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(p.second));
-			}
 
 			if (server()->options().sync_metadata_timeout == 0) {
 				err = server()->db().sync_metadata(&batch);
@@ -305,10 +298,9 @@ public:
 			}
 
 			ILOG_INFO("index: successfully indexed document: mbox: %s, id: %s, "
-					"indexed_id: %ld, keys: %d, serialized_doc_size: %ld",
-					doc.mbox.c_str(), doc.id.c_str(), doc.indexed_id,
-					keys.size(),
-					doc_value.size());
+					"indexed_id: %ld, indexes: %ld, serialized_doc_size: %ld",
+					doc.mbox.c_str(), doc.id.c_str(),
+					doc.indexed_id, indexes, doc_value.size());
 			return greylock::error_info();
 		}
 
@@ -471,7 +463,7 @@ public:
 			std::vector<ribosome::lstring> indexes = spl.convert_split_words(avalue.GetString(), avalue.GetStringLength());
 			for (size_t pos = 0; pos < indexes.size(); ++pos) {
 				auto &idx = indexes[pos];
-				if (idx.size() > options().ngram_index_size) {
+				if (idx.size() >= options().ngram_index_size) {
 					a.insert(ribosome::lconvert::to_string(idx), pos);
 				} else {
 					if (pos > 0) {

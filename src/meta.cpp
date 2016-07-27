@@ -3,6 +3,7 @@
 #include "greylock/database.hpp"
 #include "greylock/iterator.hpp"
 
+#include <boost/algorithm/string.hpp>
 #include <boost/program_options.hpp>
 
 using namespace ioremap;
@@ -19,6 +20,18 @@ static inline const char *print_time(const struct timespec *ts)
 
 	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) ts->tv_nsec / 1000);
 	return __dnet_print_time;
+}
+
+template <typename T>
+std::string dump_vector(const std::vector<T> &vec) {
+	std::ostringstream ss;
+	for (size_t i = 0; i < vec.size(); ++i) {
+		ss << vec[i];
+		if (i != vec.size() - 1)
+			ss << " ";
+	}
+
+	return ss.str();
 }
 
 int main(int argc, char *argv[])
@@ -85,19 +98,28 @@ int main(int argc, char *argv[])
 			std::ostringstream ss;
 
 			ss << ", id: " << doc.id <<
+				", author: " << doc.author <<
 				", ts: " << print_time(&doc.ts) <<
 				", data size: " << doc.data.size();
 
 			if (dump_data) {
-				ss << ", data: " << doc.data;
+				ss << "\n  data: " << doc.data;
+				ss << "\n  content:";
+				ss << "\n    content: " << dump_vector(doc.ctx.content);
+				ss << "\n      title: " << dump_vector(doc.ctx.title);
+				ss << "\n      links: " << dump_vector(doc.ctx.links);
+				ss << "\n     images: " << dump_vector(doc.ctx.images);
 			}
 
 			return ss.str();
 		};
 
 		if (vm.count("index")) {
-			for (auto it = greylock::index_iterator<greylock::read_only_database>::begin(db, iname),
-					end = greylock::index_iterator<greylock::read_only_database>::end(db, iname);
+			std::vector<std::string> cmp;
+			boost::split(cmp, iname, boost::is_any_of("."));
+
+			for (auto it = greylock::index_iterator<greylock::read_only_database>::begin(db, cmp[0], cmp[1], cmp[2]),
+					end = greylock::index_iterator<greylock::read_only_database>::end(db, cmp[0], cmp[1], cmp[2]);
 					it != end;
 					++it) {
 				std::cout << "indexed_id: " << it->indexed_id;
