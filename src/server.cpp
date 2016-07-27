@@ -94,6 +94,7 @@ public:
 			(void) buffer;
 
 			server()->db().compact();
+			this->send_reply(thevoid::http_response::ok);
 		}
 	};
 
@@ -469,7 +470,22 @@ public:
 
 			std::vector<ribosome::lstring> indexes = spl.convert_split_words(avalue.GetString(), avalue.GetStringLength());
 			for (size_t pos = 0; pos < indexes.size(); ++pos) {
-				a.insert(ribosome::lconvert::to_string(indexes[pos]), pos);
+				auto &idx = indexes[pos];
+				if (idx.size() > options().ngram_index_size) {
+					a.insert(ribosome::lconvert::to_string(idx), pos);
+				} else {
+					if (pos > 0) {
+						auto &prev = indexes[pos - 1];
+						auto i = prev + idx;
+						a.insert(ribosome::lconvert::to_string(i), pos);
+					}
+
+					if (pos < indexes.size() - 1) {
+						auto &next = indexes[pos + 1];
+						auto i = idx + next;
+						a.insert(ribosome::lconvert::to_string(i), pos);
+					}
+				}
 			}
 
 			ireq.attributes.emplace_back(a);
