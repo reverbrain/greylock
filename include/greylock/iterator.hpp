@@ -28,6 +28,15 @@ public:
 
 		return index_iterator(db, index_base, shards);
 	}
+	static index_iterator begin(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token,
+			const std::vector<size_t> &shards) {
+		std::string index_base = metadata::generate_index_base(db.opts, mbox, attr, token);
+		if (shards.size() == 0) {
+			return end(db, index_base);
+		}
+
+		return index_iterator(db, index_base, shards);
+	}
 
 	static index_iterator end(DBT &db, const std::string &base) {
 		return index_iterator(db, base);
@@ -52,6 +61,42 @@ public:
 		if (m_idx_current == m_idx_end) {
 			load_next();
 		}
+		return *this;
+	}
+
+	self_type rewind_to_index(const document::id_t &idx) {
+		size_t rewind_shard = idx / m_db.opts.tokens_shard_size;
+		//printf("rewind: %s, idx: %ld, rewind_shard: %ld\n", to_string().c_str(), idx, rewind_shard);
+
+		auto rewind_shard_it = std::lower_bound(m_shards.begin(), m_shards.end(), rewind_shard);
+		if (rewind_shard_it == m_shards.end()) {
+			set_shard_index(-1);
+			//printf("could not increase iterator: %s\n", to_string().c_str());
+			return *this;
+		}
+
+		int rewind_shard_idx = std::distance(rewind_shard_it, m_shards.begin());
+		if (rewind_shard_idx != m_shards_idx - 1) {
+			set_shard_index(rewind_shard_idx);
+			load_next();
+		}
+
+		if (m_shards_idx >= 0) {
+			document_for_index did;
+			did.indexed_id = idx;
+
+			do {
+				m_idx_current = std::lower_bound(m_idx_current, m_idx_end, did);
+				if (m_idx_current == m_idx_end) {
+					load_next();
+					if (m_shards_idx < 0)
+						break;
+				}
+
+			} while (m_idx_current->indexed_id < idx);
+		}
+
+		//printf("increased iterator: %s\n", to_string().c_str());
 		return *this;
 	}
 
@@ -84,7 +129,7 @@ public:
 		};
 		std::ostringstream ss;
 		ss << "base: " << m_base <<
-			", shard_number: " << m_shards_idx <<
+			", next_shard_idx: " << m_shards_idx <<
 			", shards: [" << dump_shards() << "] " <<
 			", ids_size: " << m_current.ids.size() <<
 			", is_end: " << (m_idx_current == m_idx_end);
@@ -131,11 +176,16 @@ private:
 		m_shards_idx = idx;
 		if (idx < 0) {
 			m_shards.clear();
+
+			m_current.ids.clear();
+			m_idx_current = m_current.ids.begin();
+			m_idx_end = m_current.ids.end();
 		}
 	}
 
 
 	void load_next() {
+		//printf("loading: %s\n", to_string().c_str());
 		m_current.ids.clear();
 		m_idx_current = m_current.ids.begin();
 		m_idx_end = m_current.ids.end();
@@ -164,6 +214,7 @@ private:
 		}
 
 		set_shard_index(m_shards_idx + 1);
+		//printf("loaded: %s\n", to_string().c_str());
 	}
 };
 }} // namespace ioremap::greylock

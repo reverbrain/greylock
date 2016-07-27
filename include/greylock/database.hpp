@@ -54,7 +54,7 @@ public:
 				return false;
 			}
 
-			index.ids.insert(did);
+			index.ids.emplace_back(did);
 			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), doc.indexed_id);
 		}
 

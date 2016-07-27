@@ -177,7 +177,7 @@ struct disk_index {
 	typedef document_for_index& reference;
 	typedef document_for_index* pointer;
 
-	std::set<document_for_index> ids;
+	std::deque<document_for_index> ids;
 
 	MSGPACK_DEFINE(ids);
 };
@@ -201,7 +201,7 @@ struct options {
 	// with the previous and next tokens.
 	// This options greatly speeds up requests with small words (like [to be or not to be]),
 	// but heavily increases index size.
-	unsigned int ngram_index_size = 3;
+	unsigned int ngram_index_size = 0;
 	
 	std::string document_prefix;
 	std::string token_shard_prefix;
