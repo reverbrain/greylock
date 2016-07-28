@@ -18,6 +18,11 @@ target_link_libraries(greylock_meta
 	greylock
 )
 
+install(TARGETS	greylock
+	LIBRARY DESTINATION lib${LIB_SUFFIX}
+	ARCHIVE DESTINATION lib${LIB_SUFFIX}
+)
 install(TARGETS	greylock_server greylock_meta
-	RUNTIME DESTINATION bin COMPONENT runtime)
+	RUNTIME DESTINATION bin COMPONENT runtime
+)
 
