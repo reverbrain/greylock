@@ -1,2 +1,1 @@
-conf/server-config.json
-conf/consul.d/*.json
+conf/

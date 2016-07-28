@@ -12,7 +12,6 @@ set(CMAKE_CXX_FLAGS "-g -std=c++0x -W -Wall -Wextra -fstack-protector-all")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 
 find_package(Boost REQUIRED COMPONENTS system program_options filesystem thread)
-find_package(Elliptics REQUIRED)
 find_package(Ribosome REQUIRED)
 
 INCLUDE(cmake/locate_library.cmake)
@@ -20,7 +19,7 @@ INCLUDE(cmake/locate_library.cmake)
 LOCATE_LIBRARY(MSGPACK "msgpack.hpp" "msgpack")
 LOCATE_LIBRARY(THEVOID "thevoid/server.hpp" "thevoid")
 LOCATE_LIBRARY(SWARM "swarm/http_request.hpp" "swarm")
-LOCATE_HEADERS(ROCKSDB "rocksdb/db.h" "rocksdb")
+LOCATE_LIBRARY(ROCKSDB "rocksdb/db.h" "rocksdb")
 
 FILE(GLOB headers
 	"${CMAKE_CURRENT_SOURCE_DIR}/include/greylock/*.hpp"
