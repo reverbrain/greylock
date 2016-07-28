@@ -1,0 +1,10 @@
+Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: greylock
+Upstream-Contact: Evgeniy Polyakov <zbr@ioremap.net>
+Source: https://github.com/reverbrain/greylock
+
+Files: *
+Copyright: (C) 2015+ Evgeniy Polyakov <zbr@ioremap.net>
+License: GPL-2+
+ The full text of the GPL is distributed in
+ /usr/share/common-licenses/GPL-2 on Debian systems.

@@ -1,4 +1,4 @@
-add_library(greylock STATIC exception.cpp)
+add_library(greylock SHARED exception.cpp)
 target_link_libraries(greylock
 	${Boost_LIBRARIES}
 	${MSGPACK_LIBRARIES}
