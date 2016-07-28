@@ -1,4 +1,9 @@
 add_library(greylock SHARED exception.cpp)
+set_target_properties(greylock PROPERTIES
+	VERSION ${GREYLOCK_MAJOR_VERSION}
+	SOVERSION ${GREYLOCK_FULL_VERSION}
+	LINKER_LANGUAGE CXX
+)
 target_link_libraries(greylock
 	${Boost_LIBRARIES}
 	${MSGPACK_LIBRARIES}
