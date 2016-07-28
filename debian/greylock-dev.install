@@ -1,2 +1,3 @@
 usr/include/greylock/*
 usr/share/greylock/*
+usr/lib/libgreylock.so
