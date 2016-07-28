@@ -67,3 +67,6 @@ rm -rf %{buildroot}
 %{_libdir}/libgreylock.so
 
 %changelog
+* Thu Jul 28 2016 Evgeniy Polyakov <zbr@ioremap.net> - 1.0.0
+- Rewrite greylock search engine to use local rocksdb storage. It is not distributed search so far.
+

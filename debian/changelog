@@ -1,0 +1,6 @@
+greylock (1.0.0) unstable; urgency=low
+
+  * Rewrite greylock search engine to use local rocksdb storage. It is not distributed search so far.
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Thu, 28 Jul 2016 08:59:06 +0400
+
