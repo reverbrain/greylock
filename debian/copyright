@@ -5,6 +5,4 @@ Source: https://github.com/reverbrain/greylock
 
 Files: *
 Copyright: (C) 2015+ Evgeniy Polyakov <zbr@ioremap.net>
-License: GPL-2+
- The full text of the GPL is distributed in
- /usr/share/common-licenses/GPL-2 on Debian systems.
+License: GPL-3.0

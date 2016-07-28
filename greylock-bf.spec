@@ -3,7 +3,7 @@ Name:		greylock
 Version:	1.0.0
 Release:	1%{?dist}.1
 
-License:	GPLv2+
+License:	GPLv3
 Group:		System Environment/Libraries
 URL:		http://reverbrain.com/
 Source0:	%{name}-%{version}.tar.bz2
