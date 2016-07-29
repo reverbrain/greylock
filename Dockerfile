@@ -1,4 +1,4 @@
-FROM reverbrain:trusty-dev
+FROM reverbrain:xenial-dev
 
 RUN	echo "deb http://repo.reverbrain.com/trusty/ current/amd64/" > /etc/apt/sources.list.d/reverbrain.list && \
 	echo "deb http://repo.reverbrain.com/trusty/ current/all/" >> /etc/apt/sources.list.d/reverbrain.list && \
@@ -15,11 +15,12 @@ RUN	echo "deb http://repo.reverbrain.com/trusty/ current/amd64/" > /etc/apt/sour
 RUN	cd /tmp && \
 	git clone https://github.com/facebook/rocksdb && \
 	cd rocksdb && \
-	make shared_lib && \
+	PORTABLE=1 make shared_lib && \
 	make INSTALL_PATH=/usr install-shared && \
 	echo "Rocksdb package has been updated and installed"
 
-RUN	apt-get install -y libboost-system-dev libboost-filesystem-dev libboost-program-options-dev libmsgpack-dev libswarm3-dev libthevoid3-dev && \
+RUN	apt-get install -y libboost-system-dev libboost-filesystem-dev libboost-program-options-dev && \
+	apt-get install -y libmsgpack-dev libswarm3-dev libthevoid3-dev ribosome-dev && \
 	cd /tmp && \
 	git clone https://github.com/reverbrain/greylock && \
 	cd greylock && \
