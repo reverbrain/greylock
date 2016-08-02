@@ -18,7 +18,7 @@ struct search_result {
 	// This will contain a cookie which must be used for the next intersection request,
 	// if current request is not complete. This may happen when client has requested limited
 	// maximum number of keys in reply and there are more keys.
-	std::string cookie;
+	document::id_t next_document_id = 0;
 	long max_number_of_documents = ~0UL;
 
 	// array of documents which contain all requested indexes
@@ -30,8 +30,9 @@ class intersector {
 public:
 	intersector(DBT &db) : m_db(db) {}
 
-	search_result intersect(const std::string &mbox, const greylock::indexes &indexes, size_t shard_offset, size_t max_num) const {
-		return intersect(mbox, indexes, shard_offset, max_num,
+	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
+			document::id_t next_document_id, size_t max_num) const {
+		return intersect(mbox, indexes, next_document_id, max_num,
 				[&] (const greylock::indexes &, search_result &) {return true;});
 	}
 
@@ -46,7 +47,8 @@ public:
 	// after call to this function returns, then intersection is completed.
 	//
 	// @search_result.completed will be set to true in this case.
-	search_result intersect(const std::string &mbox, const greylock::indexes &indexes, size_t shard_offset, size_t max_num,
+	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
+			document::id_t next_document_id, size_t max_num,
 			const std::function<bool (const greylock::indexes &, search_result &)> &finish) const {
 		search_result res;
 
@@ -91,6 +93,7 @@ public:
 			}
 		};
 
+
 		// contains vector of iterators pointing to the requested indexes
 		// iterator always points to the smallest document ID not yet pushed into resulting structure (or to client)
 		// or discarded (if other index iterators point to larger document IDs)
@@ -99,6 +102,9 @@ public:
 		for (const auto &attr: indexes.attributes) {
 			for (const auto &t: attr.tokens) {
 				iter itr(m_db, mbox, attr.name, t.name, common_shards);
+				if (next_document_id != 0)
+					itr.begin.rewind_to_index(next_document_id);
+
 				idata.emplace_back(itr);
 			}
 		}
@@ -180,7 +186,7 @@ public:
 			// 6. Return [d3, d4] values to the client
 			std::vector<pos_t> pos;
 
-			document::id_t next_id;
+			document::id_t next_id = 0;
 
 			int current = -1;
 			for (auto &itr: idata) {
@@ -194,6 +200,7 @@ public:
 				}
 
 				res.completed = false;
+				res.next_document_id = it->indexed_id + 1;
 
 				if (pos.size() == 0) {
 					pos.push_back(current);
@@ -212,6 +219,7 @@ public:
 				}
 
 				next_id = std::max(it->indexed_id, min_it->indexed_id);
+				res.next_document_id = next_id + 1;
 
 				pos.clear();
 				break;
@@ -236,17 +244,6 @@ public:
 				continue;
 			}
 
-			if (res.docs.size() == max_num) {
-				if (!finish(indexes, res))
-					continue;
-				break;
-			}
-
-			if (shard_offset > 0) {
-				shard_offset--;
-				continue;
-			}
-
 			single_doc_result rs;
 			auto &min_it = idata[pos.front()].begin;
 			auto err = min_it.document(&rs.doc);
@@ -267,6 +264,12 @@ public:
 			}
 
 			res.docs.emplace_back(rs);
+
+			if (res.docs.size() == max_num) {
+				if (!finish(indexes, res))
+					continue;
+				break;
+			}
 		}
 
 		return res;
