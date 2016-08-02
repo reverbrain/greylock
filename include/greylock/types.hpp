@@ -49,6 +49,9 @@ struct token {
 	void insert_position(pos_t pos) {
 		positions.push_back(pos);
 	}
+	void insert_positions(const std::vector<pos_t> &pos) {
+		positions.insert(positions.end(), pos.begin(), pos.end());
+	}
 
 	std::string key;
 };
@@ -79,6 +82,20 @@ struct attribute {
 		}
 
 		it->insert_position(pos);
+	}
+
+	void insert(const std::string &tname, const std::vector<pos_t> &positions) {
+		auto it = std::find_if(tokens.begin(), tokens.end(), [&](const token &t) {
+					return t.name == tname;
+				});
+		if (it == tokens.end()) {
+			token t(tname);
+			t.insert_positions(positions);
+			tokens.emplace_back(t);
+			return;
+		}
+
+		it->insert_positions(positions);
 	}
 };
 
