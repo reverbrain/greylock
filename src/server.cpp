@@ -56,8 +56,13 @@ public:
 			options::exact_match("/compact"),
 			options::methods("POST", "PUT")
 		);
+
 		on<on_index>(
 			options::exact_match("/index"),
+			options::methods("POST", "PUT")
+		);
+		on<on_index>(
+			options::exact_match("/index_tokens"),
 			options::methods("POST", "PUT")
 		);
 
@@ -141,13 +146,13 @@ public:
 				return;
 			}
 
-			size_t shard_offset = 0;
+			greylock::document::id_t next_document_id = 0;
 			size_t max_number = ~0UL;
 
-			if (doc.HasMember("paging")) {
-				const auto &pages = doc["paging"];
-				shard_offset = greylock::get_int64(pages, "shard_offset", 0);
-				max_number = greylock::get_int64(pages, "max_number", ~0UL);
+			const auto &paging = greylock::get_object(doc, "paging");
+			if (paging.IsObject()) {
+				next_document_id = greylock::get_int64(paging, "next_document_id", 0);
+				max_number = greylock::get_int64(paging, "max_number", ~0UL);
 			}
 
 			const rapidjson::Value &match = greylock::get_object(doc, "match");
@@ -164,13 +169,13 @@ public:
 
 			greylock::search_result result;
 			greylock::intersector<greylock::database> inter(server()->db());
-			result = inter.intersect(mbox, ireq, shard_offset, max_number);
+			result = inter.intersect(mbox, ireq, next_document_id, max_number);
 			send_search_result(mbox, result);
 
-			ILOG_INFO("search: attributes: %ld, shard_offset: %ld, max_number: %ld, "
+			ILOG_INFO("search: attributes: %ld, next_document_id: %ld -> %ld, max_number: %ld, "
 					"indexes: %ld, duration: %d ms",
 					ireq.attributes.size(),
-					shard_offset, max_number, result.docs.size(),
+					next_document_id, result.next_document_id, max_number, result.docs.size(),
 					search_tm.elapsed());
 		}
 
@@ -235,6 +240,8 @@ public:
 
 			ret.AddMember("ids", ids, allocator);
 			ret.AddMember("completed", result.completed, allocator);
+
+			ret.AddMember("next_document_id", result.next_document_id, allocator);
 
 			rapidjson::Value mbval(mbox.c_str(), mbox.size(), allocator);
 			ret.AddMember("mailbox", mbval, allocator);
@@ -304,6 +311,20 @@ public:
 			return greylock::error_info();
 		}
 
+		template <typename T>
+		std::vector<T> get_numeric_vector(const rapidjson::Value &data, const char *name) {
+			std::vector<T> ret;
+			const auto &arr = greylock::get_array(data, name);
+			if (!arr.IsArray())
+				return ret;
+
+			for (auto it = arr.Begin(), end = arr.End(); it != end; it++) {
+				if (it->IsNumber())
+					ret.push_back((T)it->GetDouble());
+			}
+
+			return ret;
+		}
 		std::vector<std::string> get_string_vector(const rapidjson::Value &data, const char *name) {
 			std::vector<std::string> ret;
 			const auto &arr = greylock::get_array(data, name);
@@ -326,9 +347,66 @@ public:
 			return greylock::error_info();
 		}
 
+		greylock::error_info parse_doc_tokens(greylock::document &doc, const rapidjson::Value &idxs) {
+			for (rapidjson::Value::ConstMemberIterator it = idxs.MemberBegin(),
+					idxs_end = idxs.MemberEnd(); it != idxs_end; ++it) {
+				const char *aname = it->name.GetString();
+				const rapidjson::Value &avalue = it->value;
+
+				if (!avalue.IsString())
+					continue;
+
+				std::string aname_str(aname);
+
+				greylock::attribute orig(std::string("orig_") + aname_str);
+				greylock::attribute stemmed(std::string("fixed_") + aname_str);
+
+				const auto &tokens = greylock::get_array(avalue, "tokens");
+				if (!tokens.IsArray()) {
+					return greylock::create_error(-ENOENT,
+							"index: %s, invalid 'tokens' element, must be an array",
+							aname);
+				}
+
+				for (auto tok = tokens.Begin(), tok_end = tokens.End(); tok != tok_end; ++tok) {
+					if (!tok->IsObject()) {
+						return greylock::create_error(-EINVAL,
+								"index: %s, 'tokens' array must contain objects",
+								aname);
+					}
+
+					const char *word = greylock::get_string(*tok, "word");
+					if (!word) {
+						return greylock::create_error(-EINVAL,
+								"index: %s, there is no 'word' field in objects in 'tokens' array",
+								aname);
+					}
+					std::vector<greylock::pos_t> positions =
+						get_numeric_vector<greylock::pos_t>(*tok, "positions");
+
+					orig.insert(word, positions);
+
+					const char *stem = greylock::get_string(*tok, "stem");
+					if (stem) {
+						stemmed.insert(stem, positions);
+					}
+				}
+
+				doc.idx.attributes.emplace_back(orig);
+				doc.idx.attributes.emplace_back(stemmed);
+			}
+
+			return greylock::error_info();
+		}
+
 		greylock::error_info parse_docs(const std::string &mbox, const rapidjson::Value &docs) {
 			greylock::error_info err = greylock::create_error(-ENOENT,
 					"parse_docs: mbox: %s: could not parse document, there are no valid index entries", mbox.c_str());
+
+			bool want_tokens = false;
+			if (this->request().url().path().find("/index_tokens") == 0) {
+				want_tokens = true;
+			}
 
 			for (auto it = docs.Begin(), id_end = docs.End(); it != id_end; ++it) {
 				if (!it->IsObject()) {
@@ -382,7 +460,13 @@ public:
 					return greylock::create_error(-EINVAL, "docs/index must be array");
 				}
 
-				doc.idx = server()->get_indexes(idxs);
+				if (want_tokens) {
+					err = parse_doc_tokens(doc, idxs);
+					if (err)
+						return err;
+				} else {
+					doc.idx = server()->get_indexes(idxs);
+				}
 
 				err = process_one_document(doc);
 				if (err)
@@ -535,6 +619,8 @@ private:
 
 int main(int argc, char **argv)
 {
+	ioremap::ribosome::set_locale("en_US.UTF8");
+
 	ioremap::thevoid::register_signal_handler(SIGINT, ioremap::thevoid::handle_stop_signal);
 	ioremap::thevoid::register_signal_handler(SIGTERM, ioremap::thevoid::handle_stop_signal);
 	ioremap::thevoid::register_signal_handler(SIGHUP, ioremap::thevoid::handle_reload_signal);
