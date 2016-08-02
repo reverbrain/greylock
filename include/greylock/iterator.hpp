@@ -4,6 +4,12 @@
 
 #include <iterator>
 
+#ifdef STDOUT_DEBUG
+#define dprintf(fmt, a...) printf(fmt, ##a)
+#else
+#define dprintf(fmt, ...)
+#endif
+
 namespace ioremap { namespace greylock {
 
 template <typename DBT>
@@ -48,15 +54,25 @@ public:
 
 	index_iterator(const index_iterator &src): m_db(src.m_db) {
 		m_current = src.m_current;
-		m_idx_current = m_current.ids.begin();
-		m_idx_end = m_current.ids.end();
+		if (src.m_idx_current == src.m_idx_end) {
+			m_idx_current = m_idx_end = m_current.ids.end();
+		} else {
+			typename decltype(src.m_current.ids)::const_iterator sib = src.m_current.ids.begin();
+			typename decltype(src.m_current.ids)::const_iterator sic = src.m_idx_current;
+
+			auto diff = std::distance(sib, sic);
+			dprintf("src: %s, diff: %ld\n", src.to_string().c_str(), diff);
+
+			m_idx_current = std::next(m_current.ids.begin(), diff);
+			m_idx_end = m_current.ids.end();
+		}
 
 		m_base = src.m_base;
 		m_shards = src.m_shards;
 		m_shards_idx = src.m_shards_idx;
 	}
 
-	self_type operator++() {
+	self_type &operator++() {
 		++m_idx_current;
 		if (m_idx_current == m_idx_end) {
 			load_next();
@@ -64,18 +80,18 @@ public:
 		return *this;
 	}
 
-	self_type rewind_to_index(const document::id_t &idx) {
+	self_type &rewind_to_index(const document::id_t &idx) {
 		size_t rewind_shard = idx / m_db.opts.tokens_shard_size;
-		//printf("rewind: %s, idx: %ld, rewind_shard: %ld\n", to_string().c_str(), idx, rewind_shard);
+		dprintf("rewind: %s, idx: %ld, rewind_shard: %ld\n", to_string().c_str(), idx, rewind_shard);
 
 		auto rewind_shard_it = std::lower_bound(m_shards.begin(), m_shards.end(), rewind_shard);
 		if (rewind_shard_it == m_shards.end()) {
 			set_shard_index(-1);
-			//printf("could not increase iterator: %s\n", to_string().c_str());
+			dprintf("could not increase iterator: %s\n", to_string().c_str());
 			return *this;
 		}
 
-		int rewind_shard_idx = std::distance(rewind_shard_it, m_shards.begin());
+		int rewind_shard_idx = std::distance(m_shards.begin(), rewind_shard_it);
 		if (rewind_shard_idx != m_shards_idx - 1) {
 			set_shard_index(rewind_shard_idx);
 			load_next();
@@ -96,7 +112,7 @@ public:
 			} while (m_idx_current->indexed_id < idx);
 		}
 
-		//printf("increased iterator: %s\n", to_string().c_str());
+		dprintf("increased iterator: %s\n", to_string().c_str());
 		return *this;
 	}
 
@@ -132,7 +148,8 @@ public:
 			", next_shard_idx: " << m_shards_idx <<
 			", shards: [" << dump_shards() << "] " <<
 			", ids_size: " << m_current.ids.size() <<
-			", is_end: " << (m_idx_current == m_idx_end);
+			", is_end: " << (m_idx_current == m_idx_end) <<
+			", indexed_id: " << (m_idx_current == m_idx_end) ? 0 : m_idx_current->indexed_id;
 		return ss.str();
 	}
 
@@ -185,7 +202,7 @@ private:
 
 
 	void load_next() {
-		//printf("loading: %s\n", to_string().c_str());
+		dprintf("loading: %s\n", to_string().c_str());
 		m_current.ids.clear();
 		m_idx_current = m_current.ids.begin();
 		m_idx_end = m_current.ids.end();
@@ -214,7 +231,7 @@ private:
 		}
 
 		set_shard_index(m_shards_idx + 1);
-		//printf("loaded: %s\n", to_string().c_str());
+		dprintf("loaded: %s\n", to_string().c_str());
 	}
 };
 }} // namespace ioremap::greylock
