@@ -51,6 +51,20 @@ public:
 			document::id_t next_document_id, size_t max_num,
 			const std::function<bool (const greylock::indexes &, search_result &)> &finish) const {
 		search_result res;
+#if 0
+				auto dump_vector = [] (const std::vector<size_t> &sh) -> std::string {
+					std::ostringstream ss;
+					for (size_t i = 0; i < sh.size(); ++i) {
+						ss << sh[i];
+						if (i != sh.size() - 1)
+							ss << " ";
+					}
+
+					return ss.str();
+				};
+
+#endif
+
 
 		std::vector<size_t> common_shards;
 		bool init = true;
@@ -58,7 +72,11 @@ public:
 			for (const auto &t: attr.tokens) {
 				std::string shard_key = metadata::generate_shard_key(m_db.opts, mbox, attr.name, t.name);
 				auto shards = m_db.get_shards(shard_key);
-
+#if 0
+				printf("common_shards: %s, key: %s, shards: %s\n",
+						dump_vector(common_shards).c_str(), shard_key.c_str(),
+						dump_vector(shards).c_str());
+#endif
 				// one index is empty, intersection will be empty, return early
 				if (shards.size() == 0) {
 					return res;
