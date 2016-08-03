@@ -40,13 +40,4 @@ include_directories(${PROJECT_SOURCE_DIR}/include
 	${THEVOID_INCLUDE_DIRS}
 )
 
-link_directories(
-	${Boost_LIBRARY_DIRS}
-	${MSGPACK_LIBRARY_DIRS}
-	${RIBOSOME_LIBRARY_DIRS}
-	${ROCKSDB_LIBRARY_DIRS}
-	${SWARM_LIBRARY_DIRS}
-	${THEVOID_LIBRARY_DIRS}
-)
-
 add_subdirectory(src)
