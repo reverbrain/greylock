@@ -32,6 +32,40 @@
 
 using namespace ioremap;
 
+template <typename Server>
+struct simple_request_stream_error : public thevoid::simple_request_stream<Server> {
+	void send_error(int status, int error, const char *fmt, ...) {
+		va_list args;
+		va_start(args, fmt);
+
+		char buffer[1024];
+		int sz = vsnprintf(buffer, sizeof(buffer), fmt, args);
+
+		BH_LOG(this->server()->logger(), SWARM_LOG_ERROR, "%s: %d", buffer, error);
+
+		greylock::JsonValue val;
+		rapidjson::Value ev(rapidjson::kObjectType);
+
+
+		rapidjson::Value esv(buffer, sz, val.GetAllocator());
+		ev.AddMember("message", esv, val.GetAllocator());
+		ev.AddMember("code", error, val.GetAllocator());
+		val.AddMember("error", ev, val.GetAllocator());
+
+		va_end(args);
+
+		std::string data = val.ToString();
+
+		thevoid::http_response http_reply;
+		http_reply.set_code(status);
+		http_reply.headers().set_content_length(data.size());
+		http_reply.headers().set_content_type("text/json");
+
+		this->send_reply(std::move(http_reply), std::move(data));
+	}
+};
+
+
 class http_server : public thevoid::server<http_server>
 {
 public:
@@ -84,7 +118,7 @@ public:
 		return greylock::error_info();
 	}
 
-	struct on_ping : public thevoid::simple_request_stream<http_server> {
+	struct on_ping : public simple_request_stream_error<http_server> {
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
 			(void) buffer;
 			(void) req;
@@ -93,7 +127,7 @@ public:
 		}
 	};
 
-	struct on_compact : public thevoid::simple_request_stream<http_server> {
+	struct on_compact : public simple_request_stream_error<http_server> {
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
 			(void) req;
 			(void) buffer;
@@ -103,8 +137,10 @@ public:
 		}
 	};
 
-	struct on_search : public thevoid::simple_request_stream<http_server> {
+	struct on_search : public simple_request_stream_error<http_server> {
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
+			(void) req;
+
 			ribosome::timer search_tm;
 
 			// this is needed to put ending zero-byte, otherwise rapidjson parser will explode
@@ -115,34 +151,21 @@ public:
 			doc.Parse<0>(data.c_str());
 
 			if (doc.HasParseError()) {
-				ILOG_ERROR("on_request: url: %s, error: %d: could not parse document: %s, error offset: %d",
-						req.url().to_human_readable().c_str(), -EINVAL, doc.GetParseError(), doc.GetErrorOffset());
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, -EINVAL,
+						"search: could not parse document: %s, error offset: %d",
+						doc.GetParseError(), doc.GetErrorOffset());
 				return;
 			}
 
 
 			if (!doc.IsObject()) {
-				ILOG_ERROR("on_request: url: %s, error: %d: document must be object",
-						req.url().to_human_readable().c_str(), -EINVAL);
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, -EINVAL, "search: document must be object");
 				return;
 			}
 
 			const char *mbox = greylock::get_string(doc, "mailbox");
 			if (!mbox) {
-				ILOG_ERROR("on_request: url: %s, error: %d: 'mailbox' must be a string",
-						req.url().to_human_readable().c_str(), -EINVAL);
-				this->send_reply(swarm::http_response::bad_request);
-				return;
-			}
-
-
-			const rapidjson::Value &query = greylock::get_object(doc, "query");
-			if (!query.IsObject()) {
-				ILOG_ERROR("on_request: url: %s, mailbox: %s, error: %d: 'query' must be object",
-						req.url().to_human_readable().c_str(), mbox, -EINVAL);
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, -ENOENT, "search: 'mailbox' must be a string");
 				return;
 			}
 
@@ -155,27 +178,25 @@ public:
 				max_number = greylock::get_int64(paging, "max_number", ~0UL);
 			}
 
-			const rapidjson::Value &match = greylock::get_object(doc, "match");
-			if (match.IsObject()) {
-				const char *match_type = greylock::get_string(match, "type");
-				if (match_type) {
-					if (strcmp(match_type, "and")) {
-					} else if (strcmp(match_type, "phrase")) {
-					}
-				}
+
+			const rapidjson::Value &query_and = greylock::get_object(doc, "query");
+			if (!query_and.IsObject()) {
+				send_error(swarm::http_response::bad_request, -ENOENT, "search: mailbox: %s: 'query' must be object", mbox);
+				return;
 			}
 
-			auto ireq = server()->get_indexes(query);
+
+			auto ireq = server()->get_indexes(query_and);
 
 			greylock::search_result result;
 			greylock::intersector<greylock::database> inter(server()->db());
 			result = inter.intersect(mbox, ireq, next_document_id, max_number);
 			send_search_result(mbox, result);
 
-			ILOG_INFO("search: attributes: %ld, next_document_id: %ld -> %ld, max_number: %ld, "
+			ILOG_INFO("search: attributes: %ld, next_document_id: %ld -> %ld, max_number: %ld, completed: %d, "
 					"indexes: %ld, duration: %d ms",
-					ireq.attributes.size(),
-					next_document_id, result.next_document_id, max_number, result.docs.size(),
+					ireq.attributes.size(),	next_document_id, result.next_document_id,
+					max_number, result.completed, result.docs.size(),
 					search_tm.elapsed());
 		}
 
@@ -257,7 +278,7 @@ public:
 		}
 	};
 
-	struct on_index : public thevoid::simple_request_stream<http_server> {
+	struct on_index : public simple_request_stream_error<http_server> {
 		greylock::error_info process_one_document(greylock::document &doc) {
 			auto err = server()->meta_insert(doc);
 			if (err)
@@ -477,8 +498,8 @@ public:
 		}
 
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
+			(void) req;
 			ribosome::timer index_tm;
-			ILOG_INFO("url: %s: start", req.url().to_human_readable().c_str());
 
 			// this is needed to put ending zero-byte, otherwise rapidjson parser will explode
 			std::string data(const_cast<char *>(boost::asio::buffer_cast<const char*>(buffer)),
@@ -488,41 +509,40 @@ public:
 			doc.Parse<0>(data.c_str());
 
 			if (doc.HasParseError()) {
-				ILOG_ERROR("on_request: error: %d: could not parse document: %s, error offset: %d",
-						-EINVAL, doc.GetParseError(), doc.GetErrorOffset());
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, -EINVAL,
+						"index: could not parse document: %s, error offset: %d",
+						doc.GetParseError(), doc.GetErrorOffset());
 				return;
 			}
 
 			if (!doc.IsObject()) {
-				ILOG_ERROR("on_request: error: %d: document must be object, its type: %d", -EINVAL, doc.GetType());
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, -EINVAL, "index: document must be object, its type: %d",
+						doc.GetType());
 				return;
 			}
 
 			const char *mbox = greylock::get_string(doc, "mailbox");
 			if (!mbox) {
-				ILOG_ERROR("on_request: error: %d: 'mailbox' must be a string", -EINVAL);
+				send_error(swarm::http_response::bad_request, -ENOENT, "index: 'mailbox' must be a string");
 				this->send_reply(swarm::http_response::bad_request);
 				return;
 			}
 
 			const rapidjson::Value &docs = greylock::get_array(doc, "docs");
 			if (!docs.IsArray()) {
-				ILOG_ERROR("on_request: mailbox: %s, error: %d: 'docs' must be array", mbox, -EINVAL);
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, -ENOENT, "index: mailbox: %s, 'docs' must be array", mbox);
 				return;
 			}
 
 			greylock::error_info err = parse_docs(mbox, docs);
 			if (err) {
-				ILOG_ERROR("on_request: mailbox: %s, keys: %d: insertion error: %s [%d]",
-					mbox, docs.Size(), err.message(), err.code());
-				this->send_reply(swarm::http_response::bad_request);
+				send_error(swarm::http_response::bad_request, err.code(),
+						"index: mailbox: %s, keys: %d: insertion error: %s",
+					mbox, docs.Size(), err.message());
 				return;
 			}
 
-			ILOG_INFO("on_request: mailbox: %s, keys: %d: insertion completed, index duration: %d ms",
+			ILOG_INFO("index: mailbox: %s, keys: %d: insertion completed, index duration: %d ms",
 					mbox, docs.Size(), index_tm.elapsed());
 			this->send_reply(thevoid::http_response::ok);
 		}
