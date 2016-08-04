@@ -13,7 +13,19 @@
 namespace ioremap { namespace greylock {
 
 template <typename T>
-std::string dump_vector(const std::vector<T> &vec, std::function<std::string (const T &)> convert = [] (const T &t) {return t;}) {
+std::string dump_vector(const std::vector<T> &vec) {
+	std::ostringstream ss;
+	for (size_t i = 0; i < vec.size(); ++i) {
+		ss << vec[i];
+		if (i != vec.size() - 1)
+			ss << " ";
+	}
+
+	return ss.str();
+}
+
+template <typename T>
+std::string dump_vector(const std::vector<T> &vec, std::function<std::string (const T &)> convert) {
 	std::ostringstream ss;
 	for (size_t i = 0; i < vec.size(); ++i) {
 		ss << convert(vec[i]);
