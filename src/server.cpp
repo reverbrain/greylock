@@ -293,10 +293,9 @@ public:
 
 			send_search_result(mbox, result);
 
-			ILOG_INFO("search: attributes: and: %ld, among them exact: %ld, negation: %ld, "
-					"next_document_id: %ld -> %ld, max_number: %ld, completed: %d, "
+			ILOG_INFO("search: attributes: %s, next_document_id: %ld -> %ld, max_number: %ld, completed: %d, "
 					"indexes: %ld, duration: %d ms",
-					idx.attributes.size(), idx.exact.size(), idx.negation.size(),
+					idx.to_string().c_str(),
 					next_document_id, result.next_document_id,
 					max_number, result.completed, result.docs.size(),
 					search_tm.elapsed());
