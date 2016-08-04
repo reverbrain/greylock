@@ -35,6 +35,7 @@ public:
 
 		struct greylock::disk_index index;
 		greylock::error_info err;
+		std::set<document_for_index> unique_index;
 
 		if (old_value) {
 			err = deserialize(index, old_value->data(), old_value->size());
@@ -43,6 +44,8 @@ public:
 						key.ToString().c_str(), err.message().c_str(), err.code());
 				return false;
 			}
+
+			unique_index.insert(index.ids.begin(), index.ids.end());
 		}
 
 		for (const auto& value : operand_list) {
@@ -54,10 +57,12 @@ public:
 				return false;
 			}
 
-			index.ids.emplace_back(did);
+			unique_index.emplace(did);
 			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), doc.indexed_id);
 		}
 
+		index.ids.clear();
+		index.ids.insert(index.ids.end(), unique_index.begin(), unique_index.end());
 		*new_value = serialize(index);
 
 		return true;
