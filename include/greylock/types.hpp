@@ -3,6 +3,7 @@
 #include <msgpack.hpp>
 
 #include <algorithm>
+#include <iostream>
 #include <map>
 #include <set>
 #include <string>
@@ -10,6 +11,19 @@
 #include <vector>
 
 namespace ioremap { namespace greylock {
+
+template <typename T>
+std::string dump_vector(const std::vector<T> &vec, std::function<std::string (const T &)> convert = [] (const T &t) {return t;}) {
+	std::ostringstream ss;
+	for (size_t i = 0; i < vec.size(); ++i) {
+		ss << convert(vec[i]);
+		if (i != vec.size() - 1)
+			ss << " ";
+	}
+
+	return ss.str();
+}
+
 
 template <typename T>
 greylock::error_info deserialize(T &t, const char *data, size_t size) {
@@ -101,15 +115,87 @@ struct attribute {
 
 struct indexes {
 	std::vector<attribute> attributes;
+	std::vector<attribute> exact;
+	std::vector<attribute> negation;
+
+	std::vector<attribute> merge(const std::vector<attribute> &our, const std::vector<attribute> &other) const {
+		std::map<std::string, attribute> attrs;
+
+		auto merge_one = [&] (const std::vector<attribute> &v) {
+			for (auto &a: v) {
+				if (a.tokens.empty())
+					return;
+
+				auto it = attrs.find(a.name);
+				if (it == attrs.end()) {
+					attrs.insert(std::make_pair(a.name, a));
+				} else {
+					for (auto &t: a.tokens) {
+						it->second.insert(t.name, t.positions);
+					}
+				}
+			}
+		};
+
+		merge_one(our);
+		merge_one(other);
+
+		std::vector<attribute> ret;
+		ret.reserve(attrs.size());
+		for (auto &p: attrs) {
+			ret.push_back(p.second);
+		}
+		return ret;
+	}
+
+	void merge_query(const indexes &other) {
+		attributes = merge(attributes, other.attributes);
+	}
+
+	void merge_exact(const indexes &other) {
+		exact = merge(exact, other.attributes);
+	}
+
+	void merge_negation(const indexes &other) {
+		negation = merge(negation, other.attributes);
+	}
+
+	std::string to_string() const {
+		std::ostringstream ss;
+
+		auto dump_attributes = [] (const std::vector<attribute> &v) {
+			return dump_vector<attribute>(v, [] (const attribute &a) -> std::string {
+					std::ostringstream ss;
+					ss << a.name;
+					if (a.tokens.size()) {
+						ss << ": tokens: ";
+						for (size_t i = 0; i < a.tokens.size(); ++i) {
+							auto &token = a.tokens[i];
+							ss << token.name;
+							if (i != a.tokens.size() - 1)
+								ss << " ";
+						}
+					}
+					return ss.str();
+				});
+		};
+
+		ss << "negation: [" << dump_attributes(negation) << "] " <<
+			"exact: [" << dump_attributes(exact) << "] " <<
+			"query: [" << dump_attributes(attributes) << "] ";
+		return ss.str();
+	}
 };
 
 struct content {
 	std::vector<std::string> content;
+	std::vector<std::string> stemmed_content;
 	std::vector<std::string> title;
+	std::vector<std::string> stemmed_title;
 	std::vector<std::string> links;
 	std::vector<std::string> images;
 
-	MSGPACK_DEFINE(content, title, links, images);
+	MSGPACK_DEFINE(content, stemmed_content, title, stemmed_title, links, images);
 };
 
 struct document {
@@ -281,6 +367,7 @@ struct metadata {
 		auto it = ids.find(doc.id);
 		if (it == ids.end()) {
 			doc.indexed_id = document_index++;
+			ids[doc.id] = doc.indexed_id;
 		} else {
 			doc.indexed_id = it->second;
 		}
