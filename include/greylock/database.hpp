@@ -58,7 +58,7 @@ public:
 			}
 
 			unique_index.emplace(did);
-			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), doc.indexed_id);
+			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), did.indexed_id);
 		}
 
 		index.ids.clear();
