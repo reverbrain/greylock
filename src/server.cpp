@@ -138,6 +138,84 @@ public:
 	};
 
 	struct on_search : public simple_request_stream_error<http_server> {
+		bool check_negation(const std::vector<greylock::token> &tokens, const std::vector<std::string> &content) {
+			for (const auto &t: tokens) {
+				for (const auto &word: content) {
+					if (t.name == word) {
+						return true;
+					}
+				}
+			}
+
+			return false;
+		}
+
+		bool check_exact(const std::vector<greylock::token> &tokens, const std::vector<std::string> &content) {
+			auto check_token_positions = [] (const greylock::token &token,
+					const std::vector<std::string> &content, size_t content_offset) -> bool {
+				for (size_t pos: token.positions) {
+					size_t offset = content_offset + pos;
+					if (offset >= content.size()) {
+						return false;
+					}
+
+					if (token.name != content[offset]) {
+						return false;
+					}
+				}
+
+				return true;
+			};
+
+			for (size_t content_offset = 0; content_offset < content.size(); ++content_offset) {
+				bool match = true;
+
+				for (const auto &token: tokens) {
+					match = check_token_positions(token, content, content_offset);
+					if (!match)
+						break;
+				}
+
+				if (match)
+					return true;
+			}
+
+			return false;
+		}
+
+		// returns true if record has to be accepted, false - if record must be dropped
+		bool check_result(const greylock::indexes &idx, greylock::single_doc_result &sd) {
+			const greylock::document &doc = sd.doc;
+
+			for (const auto &attr: idx.negation) {
+				bool should_drop;
+
+				if (attr.name.find("title") != std::string::npos) {
+					should_drop = check_negation(attr.tokens, doc.ctx.stemmed_title);
+				} else {
+					should_drop = check_negation(attr.tokens, doc.ctx.stemmed_content);
+				}
+
+				if (should_drop)
+					return false;
+			}
+
+			for (const auto &attr: idx.exact) {
+				bool match;
+
+				if (attr.name.find("title") != std::string::npos) {
+					match = check_exact(attr.tokens, doc.ctx.title);
+				} else {
+					match = check_exact(attr.tokens, doc.ctx.content);
+				}
+
+				if (!match)
+					return false;
+			}
+
+			return true;
+		}
+
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
 			(void) req;
 
@@ -178,24 +256,48 @@ public:
 				max_number = greylock::get_int64(paging, "max_number", ~0UL);
 			}
 
+			greylock::indexes idx;
 
 			const rapidjson::Value &query_and = greylock::get_object(doc, "query");
-			if (!query_and.IsObject()) {
-				send_error(swarm::http_response::bad_request, -ENOENT, "search: mailbox: %s: 'query' must be object", mbox);
+			if (query_and.IsObject()) {
+				auto ireq = server()->get_indexes(query_and);
+				idx.merge_query(ireq);
+			}
+
+			const rapidjson::Value &query_exact = greylock::get_object(doc, "exact");
+			if (query_exact.IsObject()) {
+				auto ireq = server()->get_indexes(query_exact);
+
+				// merge these indexes into intersection set,
+				// since exact phrase match implies document contains all tokens
+				idx.merge_exact(ireq);
+			}
+
+			const rapidjson::Value &query_negation = greylock::get_object(doc, "negation");
+			if (query_negation.IsObject()) {
+				auto ireq = server()->get_indexes(query_negation);
+				// do not merge these indexes into intersection set, put them into own container
+				idx.merge_negation(ireq);
+			}
+
+			if (idx.attributes.empty()) {
+				send_error(swarm::http_response::bad_request, -ENOENT,
+						"search: mailbox: %s, there are no queries suitable for search", mbox);
 				return;
 			}
 
-
-			auto ireq = server()->get_indexes(query_and);
-
 			greylock::search_result result;
 			greylock::intersector<greylock::database> inter(server()->db());
-			result = inter.intersect(mbox, ireq, next_document_id, max_number);
+			result = inter.intersect(mbox, idx, next_document_id, max_number,
+					std::bind(&on_search::check_result, this, std::ref(idx), std::placeholders::_1));
+
 			send_search_result(mbox, result);
 
-			ILOG_INFO("search: attributes: %ld, next_document_id: %ld -> %ld, max_number: %ld, completed: %d, "
+			ILOG_INFO("search: attributes: and: %ld, among them exact: %ld, negation: %ld, "
+					"next_document_id: %ld -> %ld, max_number: %ld, completed: %d, "
 					"indexes: %ld, duration: %d ms",
-					ireq.attributes.size(),	next_document_id, result.next_document_id,
+					idx.attributes.size(), idx.exact.size(), idx.negation.size(),
+					next_document_id, result.next_document_id,
 					max_number, result.completed, result.docs.size(),
 					search_tm.elapsed());
 		}
@@ -346,22 +448,26 @@ public:
 
 			return ret;
 		}
-		std::vector<std::string> get_string_vector(const rapidjson::Value &data, const char *name) {
+
+		std::vector<std::string> get_string_vector(const rapidjson::Value &ctx, const char *name) {
 			std::vector<std::string> ret;
-			const auto &arr = greylock::get_array(data, name);
-			if (!arr.IsArray())
+
+			const auto &a = greylock::get_array(ctx, name);
+			if (!a.IsArray())
 				return ret;
 
-			for (auto it = arr.Begin(), end = arr.End(); it != end; it++) {
+			for (auto it = a.Begin(), end = a.End(); it != end; ++it) {
 				if (it->IsString())
-					ret.push_back(it->GetString());
+					ret.push_back(std::string(it->GetString(), it->GetStringLength()));
 			}
 
 			return ret;
 		}
 		greylock::error_info parse_content(const rapidjson::Value &ctx, greylock::document &doc) {
 			doc.ctx.content = get_string_vector(ctx, "content");
+			doc.ctx.stemmed_content = get_string_vector(ctx, "stemmed_content");
 			doc.ctx.title = get_string_vector(ctx, "title");
+			doc.ctx.stemmed_title = get_string_vector(ctx, "stemmed_title");
 			doc.ctx.links = get_string_vector(ctx, "links");
 			doc.ctx.images = get_string_vector(ctx, "images");
 
