@@ -105,10 +105,12 @@ int main(int argc, char *argv[])
 			if (dump_data) {
 				ss << "\n  data: " << doc.data;
 				ss << "\n  content:";
-				ss << "\n    content: " << dump_vector(doc.ctx.content);
-				ss << "\n      title: " << dump_vector(doc.ctx.title);
-				ss << "\n      links: " << dump_vector(doc.ctx.links);
-				ss << "\n     images: " << dump_vector(doc.ctx.images);
+				ss << "\n           content: " << dump_vector(doc.ctx.content);
+				ss << "\n   stemmed content: " << dump_vector(doc.ctx.stemmed_content);
+				ss << "\n             title: " << dump_vector(doc.ctx.title);
+				ss << "\n     stemmed title: " << dump_vector(doc.ctx.stemmed_title);
+				ss << "\n             links: " << dump_vector(doc.ctx.links);
+				ss << "\n            images: " << dump_vector(doc.ctx.images);
 			}
 
 			return ss.str();
