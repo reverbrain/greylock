@@ -25,6 +25,9 @@ struct search_result {
 	std::vector<single_doc_result> docs;
 };
 
+// check whether given result matches query, may also set or change some result parameters like relevance field
+typedef std::function<bool (single_doc_result &)> check_result_function_t;
+
 template <typename DBT>
 class intersector {
 public:
@@ -33,7 +36,9 @@ public:
 	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
 			document::id_t next_document_id, size_t max_num) const {
 		return intersect(mbox, indexes, next_document_id, max_num,
-				[&] (const greylock::indexes &, search_result &) {return true;});
+				[&] (single_doc_result &) -> bool {
+					return true;
+				});
 	}
 
 	// search for intersections between all @indexes
@@ -49,7 +54,7 @@ public:
 	// @search_result.completed will be set to true in this case.
 	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
 			document::id_t next_document_id, size_t max_num,
-			const std::function<bool (const greylock::indexes &, search_result &)> &finish) const {
+			check_result_function_t check) const {
 		search_result res;
 #if 0
 				auto dump_vector = [] (const std::vector<size_t> &sh) -> std::string {
@@ -243,9 +248,11 @@ public:
 				break;
 			}
 
+			// this can only happen if one of the iterators has been finished,
+			// which means number of found positions will not be equal to the number
+			// of indexes to intersect, and thus there is no more data to push into result.
+			// Just break out of the processing loop - nothing can be added anymore.
 			if (res.completed) {
-				if (!finish(indexes, res))
-					continue;
 				break;
 			}
 
@@ -281,13 +288,13 @@ public:
 				++idata_iter;
 			}
 
-			res.docs.emplace_back(rs);
-
-			if (res.docs.size() == max_num) {
-				if (!finish(indexes, res))
-					continue;
-				break;
+			if (!check(rs)) {
+				continue;
 			}
+
+			res.docs.emplace_back(rs);
+			if (res.docs.size() == max_num)
+				break;
 		}
 
 		return res;
