@@ -248,7 +248,16 @@ public:
 				max_number = greylock::get_int64(paging, "max_number", ~0UL);
 			}
 
+			long sec_start = 0, sec_end = LONG_MAX;
+			const auto &time = greylock::get_object(doc, "time");
+			if (time.IsObject()) {
+				sec_start = greylock::get_int64(time, "start", sec_start);
+				sec_end = greylock::get_int64(time, "end", sec_end);
+			}
+
 			greylock::indexes idx;
+			idx.range_start.set_timestamp(sec_start, 0);
+			idx.range_end.set_timestamp(sec_end, 0);
 
 			const rapidjson::Value &query_and = greylock::get_object(doc, "query");
 			if (query_and.IsObject()) {
