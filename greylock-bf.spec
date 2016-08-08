@@ -1,6 +1,6 @@
 Summary:	Greylock is an embedded search engine
 Name:		greylock
-Version:	1.0.0
+Version:	1.1.0
 Release:	1%{?dist}.1
 
 License:	GPLv3
@@ -67,6 +67,12 @@ rm -rf %{buildroot}
 %{_libdir}/libgreylock.so
 
 %changelog
+* Tue Aug 09 2016 Evgeniy Polyakov <zbr@ioremap.net> - 1.1.0
+- Added date/time search
+- Added exact phrase search
+- Added negation support
+- Added pagination support
+
 * Thu Jul 28 2016 Evgeniy Polyakov <zbr@ioremap.net> - 1.0.0
 - Rewrite greylock search engine to use local rocksdb storage. It is not distributed search so far.
 

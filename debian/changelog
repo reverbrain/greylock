@@ -1,3 +1,12 @@
+greylock (1.1.0) unstable; urgency=low
+
+  * Added date/time search
+  * Added exact phrase search
+  * Added negation support
+  * Added pagination support
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Tue, 09 Aug 2016 01:24:04 +0400
+
 greylock (1.0.0) unstable; urgency=low
 
   * Rewrite greylock search engine to use local rocksdb storage. It is not distributed search so far.
