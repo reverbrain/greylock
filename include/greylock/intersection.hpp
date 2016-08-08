@@ -18,7 +18,7 @@ struct search_result {
 	// This will contain a cookie which must be used for the next intersection request,
 	// if current request is not complete. This may happen when client has requested limited
 	// maximum number of keys in reply and there are more keys.
-	id_t next_document_id = 0;
+	id_t next_document_id;
 	long max_number_of_documents = ~0UL;
 
 	// array of documents which contain all requested indexes
@@ -125,8 +125,12 @@ public:
 		for (const auto &attr: indexes.attributes) {
 			for (const auto &t: attr.tokens) {
 				iter itr(m_db, mbox, attr.name, t.name, common_shards);
-				if (next_document_id != 0)
+
+				if (next_document_id != 0) {
 					itr.begin.rewind_to_index(next_document_id);
+				} else {
+					itr.begin.rewind_to_index(indexes.range_start);
+				}
 
 				idata.emplace_back(itr);
 			}
@@ -218,6 +222,11 @@ public:
 				++current;
 
 				if (it == e) {
+					res.completed = true;
+					break;
+				}
+
+				if (it->indexed_id > indexes.range_end) {
 					res.completed = true;
 					break;
 				}
