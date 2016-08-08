@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
 					std::cerr << "index: " << iname <<
 						", shard: " << shard <<
 						", data mismatch: " <<
-						", orig size: " << data.size() <<
+						"orig size: " << data.size() <<
 						", decoded size: " << decoded.size() <<
 						", err: " << err.message() <<
 						std::endl;
