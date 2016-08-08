@@ -23,12 +23,17 @@ target_link_libraries(greylock_meta
 	greylock
 )
 
+add_executable(greylock_coder_stats rans.cpp)
+target_link_libraries(greylock_coder_stats
+	greylock
+)
+
 install(TARGETS	greylock
 	LIBRARY DESTINATION lib${LIB_SUFFIX}
 	ARCHIVE DESTINATION lib${LIB_SUFFIX}
 	BUNDLE DESTINATION library
 )
-install(TARGETS	greylock_server greylock_meta
+install(TARGETS	greylock_server greylock_meta greylock_coder_stats
 	RUNTIME DESTINATION bin COMPONENT runtime
 )
 
