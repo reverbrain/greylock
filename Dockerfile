@@ -22,6 +22,15 @@ FROM reverbrain/xenial-dev
 #	echo "Rocksdb package has been updated and installed"
 
 RUN	cd /tmp && \
+	rm -rf ribosome && \
+	git clone https://github.com/reverbrain/ribosome && \
+	cd ribosome && \
+	git branch -v && \
+	dpkg-buildpackage -b && \
+	dpkg -i ../ribosome*.deb && \
+	echo "Ribosome package has been updated and installed" && \
+
+	cd /tmp && \
 	rm -rf greylock && \
 	git clone https://github.com/reverbrain/greylock && \
 	cd greylock && \
