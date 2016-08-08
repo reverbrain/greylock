@@ -8,17 +8,17 @@
 
 using namespace ioremap;
 
-static inline const char *print_time(const struct timespec *ts)
+static inline const char *print_time(long tsec, long tnsec)
 {
 	char str[64];
 	struct tm tm;
 
 	static __thread char __dnet_print_time[128];
 
-	localtime_r((time_t *)&ts->tv_sec, &tm);
+	localtime_r((time_t *)&tsec, &tm);
 	strftime(str, sizeof(str), "%F %R:%S", &tm);
 
-	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) ts->tv_nsec / 1000);
+	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) tnsec / 1000);
 	return __dnet_print_time;
 }
 
@@ -47,16 +47,14 @@ int main(int argc, char *argv[])
 	std::string path;
 	std::string iname;
 	bool dump = false;
-	bool dump_data = false;
-	size_t indexed_id;
+	std::string id_str;
 	bpo::options_description gr("Greylock index options");
 	gr.add_options()
-		("index", bpo::value<std::string>(&iname), "index name")
-		("indexed-id", bpo::value<size_t>(&indexed_id), "read document with this indexed ID")
+		("index", bpo::value<std::string>(&iname), "index name, format: mailbox.attribute.index")
+		("id", bpo::value<std::string>(&id_str), "read document with this indexed ID, format: ts.seq")
 		("rocksdb", bpo::value<std::string>(&path)->required(),
 		 	"path to rocksdb, will be opened in read-only mode, safe to be called if different process is already using it")
-		("dump", "dump document meta (id, timestamp, data size) to stdout")
-		("dump-data", "dump document data to stdout")
+		("dump", "dump document data to stdout")
 		;
 
 	bpo::options_description cmdline_options;
@@ -81,10 +79,6 @@ int main(int argc, char *argv[])
 	if (vm.count("dump")) {
 		dump = true;
 	}
-	if (vm.count("dump-data")) {
-		dump = true;
-		dump_data = true;
-	}
 
 	try {
 		greylock::read_only_database db;
@@ -94,44 +88,62 @@ int main(int argc, char *argv[])
 			return err.code();
 		}
 
+		auto print_index = [&](const greylock::id_t &id) -> std::string {
+			long tsec, tnsec;
+			id.get_timestamp(&tsec, &tnsec);
+
+			std::ostringstream ss;
+			ss << id.to_string() <<
+				", raw_ts: " << id.timestamp <<
+				", hash: " << id.seq <<
+				", ts: " << print_time(tsec, tnsec);
+			return ss.str();
+		};
+
 		auto print_doc = [&](const greylock::document &doc) -> std::string {
 			std::ostringstream ss;
 
-			ss << ", id: " << doc.id <<
-				", author: " << doc.author <<
-				", ts: " << print_time(&doc.ts) <<
-				", data size: " << doc.data.size();
+			ss << "id: " << doc.id << ", author: " << doc.author;
 
-			if (dump_data) {
-				ss << "\n  data: " << doc.data;
-				ss << "\n  content:";
-				ss << "\n           content: " << dump_vector(doc.ctx.content);
-				ss << "\n   stemmed content: " << dump_vector(doc.ctx.stemmed_content);
-				ss << "\n             title: " << dump_vector(doc.ctx.title);
-				ss << "\n     stemmed title: " << dump_vector(doc.ctx.stemmed_title);
-				ss << "\n             links: " << dump_vector(doc.ctx.links);
-				ss << "\n            images: " << dump_vector(doc.ctx.images);
-			}
+			ss << "\n             data: " << doc.data;
+			ss << "\n          content: " << dump_vector(doc.ctx.content);
+			ss << "\n  stemmed content: " << dump_vector(doc.ctx.stemmed_content);
+			ss << "\n            title: " << dump_vector(doc.ctx.title);
+			ss << "\n    stemmed title: " << dump_vector(doc.ctx.stemmed_title);
+			ss << "\n            links: " << dump_vector(doc.ctx.links);
+			ss << "\n           images: " << dump_vector(doc.ctx.images);
 
 			return ss.str();
 		};
 
 		if (vm.count("index")) {
 			std::vector<std::string> cmp;
-			boost::split(cmp, iname, boost::is_any_of("."));
+			size_t pos = 0;
+			for (int i = 0; i < 2; ++i) {
+				size_t dot = iname.find('.', pos);
+				if (dot == std::string::npos) {
+					std::cerr << "invalid index name " << iname << ", must be mailbox.attribute.index" << std::endl;
+					return -1;
+				}
+
+				cmp.push_back(iname.substr(pos, dot - pos));
+				pos = dot + 1;
+			}
+			cmp.push_back(iname.substr(pos));
 
 			for (auto it = greylock::index_iterator<greylock::read_only_database>::begin(db, cmp[0], cmp[1], cmp[2]),
 					end = greylock::index_iterator<greylock::read_only_database>::end(db, cmp[0], cmp[1], cmp[2]);
 					it != end;
 					++it) {
-				std::cout << "indexed_id: " << it->indexed_id;
+
+				std::cout << "indexed_id: " << print_index(it->indexed_id);
 				if (dump) {
 					greylock::document doc;
 					err = it.document(&doc);
 					if (err) {
 						std::cout << ", error: " << err.message();
 					} else {
-						std::cout << print_doc(doc);
+						std::cout << ", doc: " << print_doc(doc);
 					}
 				}
 
@@ -139,11 +151,19 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if (vm.count("indexed-id")) {
+		if (vm.count("id")) {
+			auto pos = id_str.find('.');
+			if (pos == 0 || pos == std::string::npos) {
+				std::cerr << "invalid ID string: " << id_str << std::endl;
+				return -1;
+			}
+
+			greylock::id_t indexed_id(id_str.c_str());
+
 			std::string doc_data;
-			auto err = db.read(db.opts.document_prefix + std::to_string(indexed_id), &doc_data);
+			auto err = db.read(db.options().document_prefix + indexed_id.to_string(), &doc_data);
 			if (err) {
-				std::cout << "could not read document with indexed_id: " << indexed_id <<
+				std::cout << "could not read document with indexed_id: " << id_str <<
 					", error: " << err.message() << std::endl;
 				return err.code();
 			}
@@ -151,13 +171,14 @@ int main(int argc, char *argv[])
 			greylock::document doc;
 			err = greylock::deserialize(doc, doc_data.data(), doc_data.size());
 			if (err) {
-				std::cout << "could not deserialize document with indexed_id: " << indexed_id <<
+				std::cout << "could not deserialize document with indexed_id: " << id_str <<
 					", data_size: " << doc_data.size() <<
 					", error: " << err.message() << std::endl;
 				return err.code();
 			}
 
-			std::cout << "doc: indexed_id: " << indexed_id << print_doc(doc) << std::endl;
+			std::cout << "indexed_id: " << print_index(doc.indexed_id) <<
+				", doc: " << print_doc(doc) << std::endl;
 		}
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;

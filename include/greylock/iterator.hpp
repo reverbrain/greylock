@@ -26,8 +26,8 @@ public:
 	typedef std::ptrdiff_t difference_type;
 
 	static index_iterator begin(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token) {
-		std::string index_base = metadata::generate_index_base(db.opts, mbox, attr, token);
-		std::vector<size_t> shards(db.get_shards(metadata::generate_shard_key(db.opts, mbox, attr, token)));
+		std::string index_base = document::generate_index_base(db.options(), mbox, attr, token);
+		std::vector<size_t> shards(db.get_shards(document::generate_shard_key(db.options(), mbox, attr, token)));
 		if (shards.size() == 0) {
 			return end(db, index_base);
 		}
@@ -36,7 +36,7 @@ public:
 	}
 	static index_iterator begin(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token,
 			const std::vector<size_t> &shards) {
-		std::string index_base = metadata::generate_index_base(db.opts, mbox, attr, token);
+		std::string index_base = document::generate_index_base(db.options(), mbox, attr, token);
 		if (shards.size() == 0) {
 			return end(db, index_base);
 		}
@@ -48,7 +48,7 @@ public:
 		return index_iterator(db, base);
 	}
 	static index_iterator end(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token) {
-		std::string index_base = metadata::generate_index_base(db.opts, mbox, attr, token);
+		std::string index_base = document::generate_index_base(db.options(), mbox, attr, token);
 		return index_iterator(db, index_base);
 	}
 
@@ -80,8 +80,8 @@ public:
 		return *this;
 	}
 
-	self_type &rewind_to_index(const document::id_t &idx) {
-		size_t rewind_shard = idx / m_db.opts.tokens_shard_size;
+	self_type &rewind_to_index(const id_t &idx) {
+		size_t rewind_shard = document::generate_shard_number(m_db.options(), idx);
 		dprintf("rewind: %s, idx: %ld, rewind_shard: %ld\n", to_string().c_str(), idx, rewind_shard);
 
 		auto rewind_shard_it = std::lower_bound(m_shards.begin(), m_shards.end(), rewind_shard);
@@ -125,7 +125,7 @@ public:
 
 	error_info document(document *doc) {
 		std::string doc_data;
-		auto err = m_db.read(m_db.opts.document_prefix + std::to_string(m_idx_current->indexed_id), &doc_data);
+		auto err = m_db.read(m_db.options().document_prefix + m_idx_current->indexed_id.to_string(), &doc_data);
 		if (err)
 			return err;
 
@@ -212,7 +212,7 @@ private:
 			return;
 		}
 
-		std::string key = metadata::generate_index_key_shard_number(m_base, m_shards[m_shards_idx]);
+		std::string key = document::generate_index_key_shard_number(m_base, m_shards[m_shards_idx]);
 		std::string data;
 		auto err = m_db.read(key, &data);
 		if (err) {

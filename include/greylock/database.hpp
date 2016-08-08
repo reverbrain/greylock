@@ -1,7 +1,10 @@
 #pragma once
 
 #include "greylock/error.hpp"
-#include "greylock/types.hpp"
+#include "greylock/id.hpp"
+#include "greylock/utils.hpp"
+
+#include <ribosome/expiration.hpp>
 
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -16,11 +19,141 @@
 #include <rocksdb/utilities/transaction_db.h>
 #pragma GCC diagnostic pop
 
-#include <memory>
+#include <msgpack.hpp>
 
 #include <iostream>
+#include <memory>
+#include <string>
+#include <set>
+#include <vector>
 
 namespace ioremap { namespace greylock {
+
+struct options {
+	size_t tokens_shard_size = 100000*40;
+	long transaction_expiration = 60000; // 60 seconds
+	long transaction_lock_timeout = 60000; // 60 seconds
+
+	int bits_per_key = 10; // bloom filter parameter
+
+	long lru_cache_size = 100 * 1024 * 1024; // 100 MB of uncompressed data cache
+
+	long sync_metadata_timeout = 60000; // 60 seconds
+
+	// mininmum size of the token which will go into separate index,
+	// if token size is smaller, it will be combined into 2 indexes
+	// with the previous and next tokens.
+	// This options greatly speeds up requests with small words (like [to be or not to be]),
+	// but heavily increases index size.
+	unsigned int ngram_index_size = 0;
+
+	std::string document_prefix;
+	std::string token_shard_prefix;
+	std::string index_prefix;
+	std::string metadata_key;
+
+	options():
+		document_prefix("documents."),
+		token_shard_prefix("token_shards."),
+		index_prefix("index."),
+		metadata_key("greylock.meta.key")
+	{
+	}
+};
+
+class metadata {
+public:
+	metadata() : m_dirty(false), m_seq(0) {}
+
+	bool dirty() const {
+		return m_dirty;
+	}
+	void clear_dirty() {
+		m_dirty = false;
+	}
+
+	long get_sequence() {
+		m_dirty = true;
+		return m_seq++;
+	}
+
+	enum {
+		serialize_version_2 = 2,
+	};
+
+	template <typename Stream>
+	void msgpack_pack(msgpack::packer<Stream> &o) const {
+		o.pack_array(metadata::serialize_version_2);
+		o.pack((int)metadata::serialize_version_2);
+		o.pack(m_seq.load());
+	}
+
+	void msgpack_unpack(msgpack::object o) {
+		if (o.type != msgpack::type::ARRAY) {
+			std::ostringstream ss;
+			ss << "could not unpack metadata, object type is " << o.type <<
+				", must be array (" << msgpack::type::ARRAY << ")";
+			throw std::runtime_error(ss.str());
+		}
+
+		int version;
+		long seq;
+
+		msgpack::object *p = o.via.array.ptr;
+		p[0].convert(&version);
+
+		if (version != (int)o.via.array.size) {
+			std::ostringstream ss;
+			ss << "could not unpack document, invalid version: " << version << ", array size: " << o.via.array.size;
+			throw std::runtime_error(ss.str());
+		}
+
+		switch (version) {
+		case metadata::serialize_version_2:
+			p[1].convert(&seq);
+			m_seq.store(seq);
+			break;
+		default: {
+			std::ostringstream ss;
+			ss << "could not unpack metadata, invalid version " << version;
+			throw std::runtime_error(ss.str());
+		}
+		}
+	}
+
+private:
+	bool m_dirty;
+	std::atomic_long m_seq;
+};
+
+struct document_for_index {
+	id_t indexed_id;
+	MSGPACK_DEFINE(indexed_id);
+
+	bool operator<(const document_for_index &other) const {
+		return indexed_id < other.indexed_id;
+	}
+};
+
+struct disk_index {
+	typedef document_for_index value_type;
+	typedef document_for_index& reference;
+	typedef document_for_index* pointer;
+
+	std::vector<document_for_index> ids;
+
+	MSGPACK_DEFINE(ids);
+};
+
+struct disk_token {
+	std::vector<size_t> shards;
+	MSGPACK_DEFINE(shards);
+
+	disk_token() {}
+	disk_token(const std::set<size_t> &s): shards(s.begin(), s.end()) {}
+	disk_token(const std::vector<size_t> &s): shards(s) {}
+};
+
 
 class disk_index_merge_operator : public rocksdb::MergeOperator {
 public:
@@ -83,26 +216,26 @@ public:
 			std::string* new_value,
 			rocksdb::Logger *logger) const {
 
-		struct greylock::token_disk td;
+		disk_token dt;
 		std::set<size_t> shards;
 		greylock::error_info err;
 
 		if (old_value) {
-			err = deserialize(td, old_value->data(), old_value->size());
+			err = deserialize(dt, old_value->data(), old_value->size());
 			if (err) {
-				rocksdb::Error(logger, "merge: key: %s, token_disk deserialize failed: %s [%d]",
+				rocksdb::Error(logger, "merge: key: %s, disk_token deserialize failed: %s [%d]",
 						key.ToString().c_str(), err.message().c_str(), err.code());
 				return false;
 			}
 
-			shards.insert(td.shards.begin(), td.shards.end());
+			shards.insert(dt.shards.begin(), dt.shards.end());
 		}
 
 		for (const auto& value : operand_list) {
-			token_disk s;
+			disk_token s;
 			err = deserialize(s, value.data(), value.size());
 			if (err) {
-				rocksdb::Error(logger, "merge: key: %s, token_disk operand deserialize failed: %s [%d]",
+				rocksdb::Error(logger, "merge: key: %s, disk_token operand deserialize failed: %s [%d]",
 						key.ToString().c_str(), err.message().c_str(), err.code());
 				return false;
 			}
@@ -110,8 +243,8 @@ public:
 			shards.insert(s.shards.begin(), s.shards.end());
 		}
 
-		td.shards = std::vector<size_t>(shards.begin(), shards.end());
-		*new_value = serialize(td);
+		dt.shards = std::vector<size_t>(shards.begin(), shards.end());
+		*new_value = serialize(dt);
 
 		return true;
 	}
@@ -158,10 +291,8 @@ public:
 	}
 };
 
-struct read_only_database {
-	std::unique_ptr<rocksdb::DB> db;
-	options opts;
-
+class read_only_database {
+public:
 	greylock::error_info open(const std::string &path) {
 		rocksdb::Options options;
 		options.max_open_files = 1000;
@@ -179,13 +310,13 @@ struct read_only_database {
 			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
 					path.c_str(), s.ToString().c_str());
 		}
-		this->db.reset(db);
+		m_db.reset(db);
 
 		return greylock::error_info();
 	}
 
 	greylock::error_info read(const std::string &key, std::string *ret) {
-		auto s = db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
+		auto s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
 		}
@@ -193,58 +324,73 @@ struct read_only_database {
 	}
 
 	std::vector<size_t> get_shards(const std::string &key) {
-		token_disk td;
+		disk_token dt;
 
 		std::string ser_shards;
 		auto err = read(key, &ser_shards);
 		if (err) {
 			//printf("could not read shards, key: %s, err: %s [%d]\n", key.c_str(), err.message().c_str(), err.code());
-			return td.shards;
+			return dt.shards;
 		}
 
-		err = deserialize(td, ser_shards.data(), ser_shards.size());
+		err = deserialize(dt, ser_shards.data(), ser_shards.size());
 		if (err)
-			return td.shards;
+			return dt.shards;
 
-		return td.shards;
+		return dt.shards;
 	}
+
+	const greylock::options &options() const {
+		return m_opts;
+	}
+
+private:
+	std::unique_ptr<rocksdb::DB> m_db;
+	greylock::options m_opts;
 };
 
 
-struct database {
-	std::unique_ptr<rocksdb::DB> db;
-	options opts;
-	metadata meta;
-
+class database {
+public:
 	~database() {
+		m_expiration_timer.stop();
+
+		sync_metadata(NULL);
+	}
+
+	const greylock::options &options() const {
+		return m_opts;
+	}
+	greylock::metadata &metadata() {
+		return m_meta;
 	}
 
 	void compact() {
 		struct rocksdb::CompactRangeOptions opts;
 		opts.change_level = true;
 		opts.target_level = 0;
-		db->CompactRange(opts, NULL, NULL);
+		m_db->CompactRange(opts, NULL, NULL);
 	}
 
 	greylock::error_info sync_metadata(rocksdb::WriteBatch *batch) {
-		if (!meta.dirty)
+		if (!m_meta.dirty())
 			return greylock::error_info();
 
-		std::string meta_serialized = serialize(meta);
+		std::string meta_serialized = serialize(m_meta);
 
 		rocksdb::Status s;
 		if (batch) {
-			batch->Put(rocksdb::Slice(opts.metadata_key), rocksdb::Slice(meta_serialized));
+			batch->Put(rocksdb::Slice(m_opts.metadata_key), rocksdb::Slice(meta_serialized));
 		} else {
-			s = db->Put(rocksdb::WriteOptions(), rocksdb::Slice(opts.metadata_key), rocksdb::Slice(meta_serialized));
+			s = m_db->Put(rocksdb::WriteOptions(), rocksdb::Slice(m_opts.metadata_key), rocksdb::Slice(meta_serialized));
 		}
 
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not write metadata key: %s, error: %s",
-					opts.metadata_key.c_str(), s.ToString().c_str());
+					m_opts.metadata_key.c_str(), s.ToString().c_str());
 		}
 
-		meta.dirty = false;
+		m_meta.clear_dirty();
 		return greylock::error_info();
 	}
 
@@ -265,8 +411,8 @@ struct database {
 		//dbo.memtable_prefix_bloom_probes = 6;
 
 		rocksdb::BlockBasedTableOptions table_options;
-		table_options.block_cache = rocksdb::NewLRUCache(opts.lru_cache_size); // 100MB of uncompresseed data cache
-		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(opts.bits_per_key, true));
+		table_options.block_cache = rocksdb::NewLRUCache(m_opts.lru_cache_size); // 100MB of uncompresseed data cache
+		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(m_opts.bits_per_key, true));
 		dbo.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
 
 		rocksdb::DB *db;
@@ -276,46 +422,75 @@ struct database {
 			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
 					path.c_str(), s.ToString().c_str());
 		}
-		this->db.reset(db);
+		m_db.reset(db);
 
 		std::string meta;
-		s = db->Get(rocksdb::ReadOptions(), rocksdb::Slice(opts.metadata_key), &meta);
+		s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(m_opts.metadata_key), &meta);
 		if (!s.ok() && !s.IsNotFound()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s",
-					opts.metadata_key.c_str(), s.ToString().c_str());
+					m_opts.metadata_key.c_str(), s.ToString().c_str());
 		}
 
 		if (s.ok()) {
-			auto err = deserialize(this->meta, meta.data(), meta.size());
+			auto err = deserialize(m_meta, meta.data(), meta.size());
 			if (err)
 				return greylock::create_error(err.code(), "metadata deserialization failed, key: %s, error: %s",
-					opts.metadata_key.c_str(), err.message().c_str());
+					m_opts.metadata_key.c_str(), err.message().c_str());
+		}
+
+		if (m_opts.sync_metadata_timeout > 0) {
+			sync_metadata_callback();
 		}
 
 		return greylock::error_info(); 
 	}
 
 	std::vector<size_t> get_shards(const std::string &key) {
-		token_disk td;
+		disk_token dt;
 
 		std::string ser_shards;
 		auto err = read(key, &ser_shards);
 		if (err)
-			return td.shards;
+			return dt.shards;
 
-		err = deserialize(td, ser_shards.data(), ser_shards.size());
+		err = deserialize(dt, ser_shards.data(), ser_shards.size());
 		if (err)
-			return td.shards;
+			return dt.shards;
 
-		return td.shards;
+		return dt.shards;
 	}
 
 	greylock::error_info read(const std::string &key, std::string *ret) {
-		auto s = db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
+		auto s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
 		}
 		return greylock::error_info();
+	}
+
+	greylock::error_info write(rocksdb::WriteBatch *batch) {
+		auto wo = rocksdb::WriteOptions();
+
+		auto s = m_db->Write(wo, batch);
+		if (!s.ok()) {
+			return greylock::create_error(-s.code(), "could not write batch: %s", s.ToString().c_str());
+		}
+
+		return greylock::error_info();
+	}
+
+private:
+	std::unique_ptr<rocksdb::DB> m_db;
+	greylock::options m_opts;
+	greylock::metadata m_meta;
+
+	ribosome::expiration m_expiration_timer;
+
+	void sync_metadata_callback() {
+		sync_metadata(NULL);
+
+		auto expires_at = std::chrono::system_clock::now() + std::chrono::milliseconds(m_opts.sync_metadata_timeout);
+		m_expiration_timer.insert(expires_at, std::bind(&database::sync_metadata_callback, this));
 	}
 };
 

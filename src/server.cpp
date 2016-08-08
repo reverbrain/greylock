@@ -4,6 +4,7 @@
 #include "greylock/jsonvalue.hpp"
 #include "greylock/intersection.hpp"
 #include "greylock/types.hpp"
+#include "greylock/utils.hpp"
 
 #include <unistd.h>
 #include <signal.h>
@@ -11,7 +12,6 @@
 #include <thevoid/server.hpp>
 #include <thevoid/stream.hpp>
 
-#include <ribosome/expiration.hpp>
 #include <ribosome/split.hpp>
 #include <ribosome/timer.hpp>
 
@@ -70,13 +70,8 @@ class http_server : public thevoid::server<http_server>
 {
 public:
 	virtual ~http_server() {
-		m_expiration_timer.stop();
-
-		if (db().db) {
-			db().sync_metadata(NULL);
-			ILOG_INFO("Synced metadata, key: %s", db().opts.metadata_key.c_str());
-		}
 	}
+
 	virtual bool initialize(const rapidjson::Value &config) {
 		if (!rocksdb_init(config))
 			return false;
@@ -109,13 +104,10 @@ public:
 	}
 
 	const greylock::options &options() const {
-		return m_db.opts;
+		return m_db.options();
 	}
-
-	greylock::error_info meta_insert(greylock::document &doc) {
-		std::lock_guard<std::mutex> guard(m_lock);
-		db().meta.insert(options(), doc);
-		return greylock::error_info();
+	greylock::metadata &metadata() {
+		return m_db.metadata();
 	}
 
 	struct on_ping : public simple_request_stream_error<http_server> {
@@ -247,12 +239,12 @@ public:
 				return;
 			}
 
-			greylock::document::id_t next_document_id = 0;
+			greylock::id_t next_document_id;
 			size_t max_number = ~0UL;
 
 			const auto &paging = greylock::get_object(doc, "paging");
 			if (paging.IsObject()) {
-				next_document_id = greylock::get_int64(paging, "next_document_id", 0);
+				next_document_id = greylock::id_t(greylock::get_string(paging, "next_document_id"));
 				max_number = greylock::get_int64(paging, "max_number", ~0UL);
 			}
 
@@ -293,10 +285,10 @@ public:
 
 			send_search_result(mbox, result);
 
-			ILOG_INFO("search: attributes: %s, next_document_id: %ld -> %ld, max_number: %ld, completed: %d, "
+			ILOG_INFO("search: attributes: %s, next_document_id: %s -> %s, max_number: %ld, completed: %d, "
 					"indexes: %ld, duration: %d ms",
 					idx.to_string().c_str(),
-					next_document_id, result.next_document_id,
+					next_document_id.to_string().c_str(), result.next_document_id.to_string().c_str(),
 					max_number, result.completed, result.docs.size(),
 					search_tm.elapsed());
 		}
@@ -335,7 +327,10 @@ public:
 
 				rapidjson::Value idv(doc.id.c_str(), doc.id.size(), allocator);
 				key.AddMember("id", idv, allocator);
-				key.AddMember("indexed_id", doc.indexed_id, allocator);
+
+				std::string id_str = doc.indexed_id.to_string();
+				rapidjson::Value indv(id_str.c_str(), id_str.size(), allocator);
+				key.AddMember("indexed_id", indv, allocator);
 
 				rapidjson::Value dv(doc.data.c_str(), doc.data.size(), allocator);
 				key.AddMember("data", dv, allocator);
@@ -352,9 +347,11 @@ public:
 
 				key.AddMember("relevance", it->relevance, allocator);
 
+				long tsec, tnsec;
+				doc.indexed_id.get_timestamp(&tsec, &tnsec);
 				rapidjson::Value ts(rapidjson::kObjectType);
-				ts.AddMember("tsec", doc.ts.tv_sec, allocator);
-				ts.AddMember("tnsec", doc.ts.tv_nsec, allocator);
+				ts.AddMember("tsec", tsec, allocator);
+				ts.AddMember("tnsec", tnsec, allocator);
 				key.AddMember("timestamp", ts, allocator);
 
 				ids.PushBack(key, allocator);
@@ -363,7 +360,9 @@ public:
 			ret.AddMember("ids", ids, allocator);
 			ret.AddMember("completed", result.completed, allocator);
 
-			ret.AddMember("next_document_id", result.next_document_id, allocator);
+			std::string next_id_str = result.next_document_id.to_string();
+			rapidjson::Value nidv(next_id_str.c_str(), next_id_str.size(), allocator);
+			ret.AddMember("next_document_id", nidv, allocator);
 
 			rapidjson::Value mbval(mbox.c_str(), mbox.size(), allocator);
 			ret.AddMember("mailbox", mbval, allocator);
@@ -381,13 +380,9 @@ public:
 
 	struct on_index : public simple_request_stream_error<http_server> {
 		greylock::error_info process_one_document(greylock::document &doc) {
-			auto err = server()->meta_insert(doc);
-			if (err)
-				return err;
+			doc.generate_token_keys(server()->options());
 
-			auto wo = rocksdb::WriteOptions();
 			rocksdb::WriteBatch batch;
-			rocksdb::Status s;
 
 			std::string doc_serialized = serialize(doc);
 			rocksdb::Slice doc_value(doc_serialized);
@@ -401,35 +396,35 @@ public:
 				for (const auto &t: attr.tokens) {
 					batch.Merge(rocksdb::Slice(t.key), rocksdb::Slice(sdid));
 
-					greylock::token_disk td(t.shards);
-					std::string tds = serialize(td);
+					greylock::disk_token dt(t.shards);
+					std::string dts = serialize(dt);
 
-					batch.Merge(rocksdb::Slice(t.shard_key), rocksdb::Slice(tds));
+					batch.Merge(rocksdb::Slice(t.shard_key), rocksdb::Slice(dts));
 
 					indexes++;
 				}
 			}
 
-			std::string dkey = server()->options().document_prefix + std::to_string(doc.indexed_id);
+			std::string dkey = server()->options().document_prefix + doc.indexed_id.to_string();
 			batch.Put(rocksdb::Slice(dkey), doc_value);
 
 			if (server()->options().sync_metadata_timeout == 0) {
-				err = server()->db().sync_metadata(&batch);
+				auto err = server()->db().sync_metadata(&batch);
 				if (err) {
 					return err;
 				}
 			}
 
-			s = server()->db().db->Write(wo, &batch);
-			if (!s.ok()) {
-				return greylock::create_error(-s.code(), "could not write index batch, mbox: %s, id: %s, error: %s",
-						doc.mbox.c_str(), doc.id.c_str(), s.ToString().c_str());
+			auto err = server()->db().write(&batch);
+			if (err) {
+				return greylock::create_error(err.code(), "could not write index batch, mbox: %s, id: %s, error: %s",
+					doc.mbox.c_str(), doc.id.c_str(), err.message().c_str());
 			}
 
 			ILOG_INFO("index: successfully indexed document: mbox: %s, id: %s, "
-					"indexed_id: %ld, indexes: %ld, serialized_doc_size: %ld",
+					"indexed_id: %s, indexes: %ld, serialized_doc_size: %ld",
 					doc.mbox.c_str(), doc.id.c_str(),
-					doc.indexed_id, indexes, doc_value.size());
+					doc.indexed_id.to_string().c_str(), indexes, doc_value.size());
 			return greylock::error_info();
 		}
 
@@ -547,26 +542,23 @@ public:
 				}
 
 				struct timespec ts;
+				clock_gettime(CLOCK_REALTIME, &ts);
 
+				long tsec, tnsec;
 				const rapidjson::Value &timestamp = greylock::get_object(*it, "timestamp");
 				if (timestamp.IsObject()) {
-					long tsec, tnsec;
-
 					tsec = greylock::get_int64(timestamp, "tsec", ts.tv_sec);
 					tnsec = greylock::get_int64(timestamp, "tnsec", ts.tv_nsec);
-
-					ts.tv_sec = tsec;
-					ts.tv_nsec = tnsec;
 				} else {
-					clock_gettime(CLOCK_REALTIME, &ts);
+					tsec = ts.tv_sec;
+					tnsec = ts.tv_nsec;
 				}
 
 
 				greylock::document doc;
 				doc.mbox = mbox;
-				doc.ts = ts;
+				doc.assign_id(id, server()->metadata().get_sequence(), tsec, tnsec);
 
-				doc.id.assign(id);
 				if (data) {
 					doc.data.assign(data);
 				}
@@ -699,21 +691,7 @@ public:
 	}
 
 private:
-	std::mutex m_lock;
 	greylock::database m_db;
-
-	ribosome::expiration m_expiration_timer;
-
-	void sync_metadata_callback() {
-		if (db().meta.dirty) {
-			db().sync_metadata(NULL);
-			ILOG_INFO("Synced metadata, key: %s", db().opts.metadata_key.c_str());
-		}
-
-		auto expires_at = std::chrono::system_clock::now() +
-			std::chrono::milliseconds(this->options().sync_metadata_timeout);
-		m_expiration_timer.insert(expires_at, std::bind(&http_server::sync_metadata_callback, this));
-	}
 
 	bool rocksdb_init(const rapidjson::Value &config) {
 		const auto &rconf = greylock::get_object(config, "rocksdb");
@@ -732,10 +710,6 @@ private:
 		if (err) {
 			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;
-		}
-
-		if (this->options().sync_metadata_timeout > 0) {
-			sync_metadata_callback();
 		}
 
 		return true;

@@ -18,7 +18,7 @@ struct search_result {
 	// This will contain a cookie which must be used for the next intersection request,
 	// if current request is not complete. This may happen when client has requested limited
 	// maximum number of keys in reply and there are more keys.
-	document::id_t next_document_id = 0;
+	id_t next_document_id = 0;
 	long max_number_of_documents = ~0UL;
 
 	// array of documents which contain all requested indexes
@@ -34,7 +34,7 @@ public:
 	intersector(DBT &db) : m_db(db) {}
 
 	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
-			document::id_t next_document_id, size_t max_num) const {
+			id_t next_document_id, size_t max_num) const {
 		return intersect(mbox, indexes, next_document_id, max_num,
 				[&] (single_doc_result &) -> bool {
 					return true;
@@ -53,7 +53,7 @@ public:
 	//
 	// @search_result.completed will be set to true in this case.
 	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
-			document::id_t next_document_id, size_t max_num,
+			id_t next_document_id, size_t max_num,
 			check_result_function_t check) const {
 		search_result res;
 #if 0
@@ -75,7 +75,7 @@ public:
 		bool init = true;
 		for (const auto &attr: indexes.attributes) {
 			for (const auto &t: attr.tokens) {
-				std::string shard_key = metadata::generate_shard_key(m_db.opts, mbox, attr.name, t.name);
+				std::string shard_key = document::generate_shard_key(m_db.options(), mbox, attr.name, t.name);
 				auto shards = m_db.get_shards(shard_key);
 #if 0
 				printf("common_shards: %s, key: %s, shards: %s\n",
@@ -209,7 +209,7 @@ public:
 			// 6. Return [d3, d4] values to the client
 			std::vector<pos_t> pos;
 
-			document::id_t next_id = 0;
+			id_t next_id;
 
 			int current = -1;
 			for (auto &itr: idata) {
@@ -223,7 +223,7 @@ public:
 				}
 
 				res.completed = false;
-				res.next_document_id = it->indexed_id + 1;
+				res.next_document_id.set_next_id(it->indexed_id);
 
 				if (pos.size() == 0) {
 					pos.push_back(current);
@@ -242,7 +242,7 @@ public:
 				}
 
 				next_id = std::max(it->indexed_id, min_it->indexed_id);
-				res.next_document_id = next_id + 1;
+				res.next_document_id.set_next_id(next_id);
 
 				pos.clear();
 				break;

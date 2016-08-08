@@ -1,8 +1,12 @@
 #pragma once
 
+#include "greylock/database.hpp"
+#include "greylock/id.hpp"
+
 #include <msgpack.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <iostream>
 #include <map>
 #include <set>
@@ -11,56 +15,6 @@
 #include <vector>
 
 namespace ioremap { namespace greylock {
-
-template <typename T>
-std::string dump_vector(const std::vector<T> &vec) {
-	std::ostringstream ss;
-	for (size_t i = 0; i < vec.size(); ++i) {
-		ss << vec[i];
-		if (i != vec.size() - 1)
-			ss << " ";
-	}
-
-	return ss.str();
-}
-
-template <typename T>
-std::string dump_vector(const std::vector<T> &vec, std::function<std::string (const T &)> convert) {
-	std::ostringstream ss;
-	for (size_t i = 0; i < vec.size(); ++i) {
-		ss << convert(vec[i]);
-		if (i != vec.size() - 1)
-			ss << " ";
-	}
-
-	return ss.str();
-}
-
-
-template <typename T>
-greylock::error_info deserialize(T &t, const char *data, size_t size) {
-	msgpack::unpacked msg;
-	try {
-		msgpack::unpack(&msg, data, size);
-
-		msg.get().convert(&t);
-	} catch (const std::exception &e) {
-		std::ostringstream ss;
-		ss << msg.get();
-		return greylock::create_error(-EINVAL, "could not unpack data, size: %ld, value: %s, error: %s",
-				size, ss.str().c_str(), e.what());
-	}
-
-	return greylock::error_info();
-}
-
-template <typename T>
-std::string serialize(const T &t) {
-	std::stringstream buffer;
-	msgpack::pack(buffer, t);
-	buffer.seekg(0);
-	return buffer.str();
-}
 
 typedef int pos_t;
 
@@ -80,15 +34,6 @@ struct token {
 	}
 
 	std::string key;
-};
-
-struct token_disk {
-	std::vector<size_t> shards;
-	MSGPACK_DEFINE(shards);
-
-	token_disk() {}
-	token_disk(const std::set<size_t> &s): shards(s.begin(), s.end()) {}
-	token_disk(const std::vector<size_t> &s): shards(s) {}
 };
 
 struct attribute {
@@ -211,21 +156,19 @@ struct content {
 };
 
 struct document {
-	typedef uint64_t id_t;
+	id_t indexed_id;
+
 	enum {
 		serialize_version_7 = 7,
 	};
 
 	std::string mbox;
-	struct timespec ts;
 
 	std::string author;
 	std::string data;
 	std::string id;
 
 	content ctx;
-
-	id_t indexed_id = 0;
 
 	indexes idx;
 
@@ -237,8 +180,8 @@ struct document {
 		o.pack(author);
 		o.pack(ctx);
 		o.pack(id);
-		o.pack(ts.tv_sec);
-		o.pack(ts.tv_nsec);
+		o.pack(indexed_id);
+		o.pack(0); // unused
 	}
 
 	void msgpack_unpack(msgpack::object o) {
@@ -266,8 +209,8 @@ struct document {
 			p[2].convert(&author);
 			p[3].convert(&ctx);
 			p[4].convert(&id);
-			p[5].convert(&ts.tv_sec);
-			p[6].convert(&ts.tv_nsec);
+			p[5].convert(&indexed_id);
+			//p[6].convert(); unused
 			break;
 		default: {
 			std::ostringstream ss;
@@ -276,67 +219,30 @@ struct document {
 		}
 		}
 	}
-};
 
-struct document_for_index {
-	document::id_t indexed_id;
-	MSGPACK_DEFINE(indexed_id);
-
-	bool operator<(const document_for_index &other) const {
-		return indexed_id < other.indexed_id;
+	void assign_id(const char *cid, long seq, long tsec, long tnsec) {
+		id.assign(cid);
+		indexed_id.seq = seq;
+		indexed_id.set_timestamp(tsec, tnsec);
 	}
-};
 
-struct disk_index {
-	typedef document_for_index value_type;
-	typedef document_for_index& reference;
-	typedef document_for_index* pointer;
+	void generate_token_keys(const options &options) {
+		for (auto &attr: idx.attributes) {
+			for (auto &t: attr.tokens) {
+				t.key = generate_index_key(options, mbox, attr.name, t.name, indexed_id);
+				t.shard_key = generate_shard_key(options, mbox, attr.name, t.name);
 
-	std::deque<document_for_index> ids;
-
-	MSGPACK_DEFINE(ids);
-};
-
-struct options {
-	size_t tokens_shard_size = 10000;
-	long transaction_expiration = 60000; // 60 seconds
-	long transaction_lock_timeout = 60000; // 60 seconds
-
-	// if zero, sync metadata after each update
-	// if negative, only sync at database close (server stop)
-	// if positive, sync every @sync_metadata_timeout milliseconds
-	int sync_metadata_timeout = 60000;
-
-	int bits_per_key = 10; // bloom filter parameter
-
-	long lru_cache_size = 100 * 1024 * 1024; // 100 MB of uncompressed data cache
-
-	// mininmum size of the token which will go into separate index,
-	// if token size is smaller, it will be combined into 2 indexes
-	// with the previous and next tokens.
-	// This options greatly speeds up requests with small words (like [to be or not to be]),
-	// but heavily increases index size.
-	unsigned int ngram_index_size = 0;
-	
-	std::string document_prefix;
-	std::string token_shard_prefix;
-	std::string index_prefix;
-	std::string metadata_key;
-
-	options():
-		document_prefix("documents."),
-		token_shard_prefix("token_shards."),
-		index_prefix("index."),
-		metadata_key("greylock.meta.key")
-	{
+				size_t shard_number = generate_shard_number(options, indexed_id);
+				t.shards.insert(shard_number);
+			}
+		}
 	}
-};
 
-struct metadata {
-	std::map<std::string, document::id_t> ids;
-	document::id_t document_index;
-
-	bool dirty = false;
+	static size_t generate_shard_number(const options &options, const id_t &indexed_id) {
+		long tsec, tnsec;
+		indexed_id.get_timestamp(&tsec, &tnsec);
+		return tsec / options.tokens_shard_size;
+	}
 
 	static std::string generate_index_base(const options &options,
 			const std::string &mbox, const std::string &attr, const std::string &token) {
@@ -354,13 +260,13 @@ struct metadata {
 
 		return std::string(ckey, csize);
 	}
-	static std::string generate_index_key(const options &options, const std::string &base, const document::id_t &indexed_id) {
-		size_t shard_number = indexed_id / options.tokens_shard_size;
+	static std::string generate_index_key(const options &options, const std::string &base, const id_t &indexed_id) {
+		size_t shard_number = generate_shard_number(options, indexed_id);
 		return generate_index_key_shard_number(base, shard_number);
 	}
 	static std::string generate_index_key(const options &options,
 			const std::string &mbox, const std::string &attr, const std::string &token,
-			const document::id_t &indexed_id) {
+			const id_t &indexed_id) {
 		std::string base = generate_index_base(options, mbox, attr, token);
 		return generate_index_key(options, base, indexed_id);
 	}
@@ -374,72 +280,6 @@ struct metadata {
 
 		return std::string(ckey, csize);
 	}
-
-	void insert(const options &options, document &doc) {
-		auto it = ids.find(doc.id);
-		if (it == ids.end()) {
-			doc.indexed_id = document_index++;
-			ids[doc.id] = doc.indexed_id;
-		} else {
-			doc.indexed_id = it->second;
-		}
-
-		for (auto &attr: doc.idx.attributes) {
-			for (auto &t: attr.tokens) {
-				t.key = generate_index_key(options, doc.mbox, attr.name, t.name, doc.indexed_id);
-				t.shard_key = generate_shard_key(options, doc.mbox, attr.name, t.name);
-
-				size_t shard_number = doc.indexed_id / options.tokens_shard_size;
-				t.shards.insert(shard_number);
-			}
-		}
-	}
-
-	enum {
-		serialize_version_4 = 4,
-	};
-	template <typename Stream>
-	void msgpack_pack(msgpack::packer<Stream> &o) const {
-		o.pack_array(metadata::serialize_version_4);
-		o.pack((int)metadata::serialize_version_4);
-		o.pack(ids);
-		o.pack(document_index);
-		//o.pack(token_shards);
-	}
-
-	void msgpack_unpack(msgpack::object o) {
-		if (o.type != msgpack::type::ARRAY) {
-			std::ostringstream ss;
-			ss << "could not unpack metadata, object type is " << o.type <<
-				", must be array (" << msgpack::type::ARRAY << ")";
-			throw std::runtime_error(ss.str());
-		}
-
-		int version;
-
-		msgpack::object *p = o.via.array.ptr;
-		p[0].convert(&version);
-
-		if (version != (int)o.via.array.size) {
-			std::ostringstream ss;
-			ss << "could not unpack metadata, invalid version: " << version << ", array size: " << o.via.array.size;
-			throw std::runtime_error(ss.str());
-		}
-
-		switch (version) {
-		case metadata::serialize_version_4:
-			p[1].convert(&ids);
-			p[2].convert(&document_index);
-			//p[3].convert(&token_shards);
-			break;
-		default: {
-			std::ostringstream ss;
-			ss << "could not unpack document, invalid version " << version;
-			throw std::runtime_error(ss.str());
-		}
-		}
-	}
 };
-
 
 }} // namespace ioremap::greylock
