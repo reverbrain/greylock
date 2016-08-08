@@ -75,6 +75,8 @@ struct indexes {
 	std::vector<attribute> exact;
 	std::vector<attribute> negation;
 
+	id_t range_start, range_end;
+
 	std::vector<attribute> merge(const std::vector<attribute> &our, const std::vector<attribute> &other) const {
 		std::map<std::string, attribute> attrs;
 
@@ -222,8 +224,9 @@ struct document {
 
 	void assign_id(const char *cid, long seq, long tsec, long tnsec) {
 		id.assign(cid);
-		indexed_id.seq = seq;
-		indexed_id.set_timestamp(tsec, tnsec);
+		(void) tnsec;
+		//indexed_id.seq = seq;
+		indexed_id.set_timestamp(tsec, seq);
 	}
 
 	void generate_token_keys(const options &options) {
