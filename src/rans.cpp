@@ -3,7 +3,6 @@
 
 #include <ribosome/rans.hpp>
 
-#include <boost/algorithm/string.hpp>
 #include <boost/program_options.hpp>
 
 #include <fstream>
@@ -25,10 +24,12 @@ int main(int argc, char *argv[])
 	std::string path;
 	std::vector<std::string> inames;
 	std::string save_stats_file, load_stats_file;
+	std::string save_index_dir;
 	bpo::options_description gr("Greylock index options");
 	gr.add_options()
 		("index", bpo::value<std::vector<std::string>>(&inames)->required()->composing(),
 			"index name, format: mailbox.attribute.index")
+		("save-index", bpo::value<std::string>(&save_index_dir), "save indexes into this directory, it must exist")
 		("save-stats", bpo::value<std::string>(&save_stats_file), "gather stats from given indexes and save to this file")
 		("load-stats", bpo::value<std::string>(&load_stats_file), "load previously saved stats from given file")
 		("rocksdb", bpo::value<std::string>(&path)->required(),
@@ -118,6 +119,11 @@ int main(int argc, char *argv[])
 					", code: " << err.code() <<
 					std::endl;
 				return err.code();
+			}
+
+			if (save_index_dir.size()) {
+				std::ofstream iout((save_index_dir + "/" + key).c_str(), std::ios::trunc);
+				iout.write(data.data(), data.size());
 			}
 
 			if (save_stats_file.size()) {
