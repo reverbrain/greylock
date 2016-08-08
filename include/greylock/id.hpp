@@ -13,7 +13,7 @@ struct id_t {
 	uint64_t	timestamp = 0;
 	uint64_t	seq = 0;
 
-	MSGPACK_DEFINE(timestamp, seq);
+	MSGPACK_DEFINE(timestamp);
 
 	void set_timestamp(long tsec, long nsec) {
 		timestamp = tsec;
@@ -33,6 +33,14 @@ struct id_t {
 			return false;
 
 		return seq < other.seq;
+	}
+	bool operator>(const id_t &other) const {
+		if (timestamp > other.timestamp)
+			return true;
+		if (timestamp < other.timestamp)
+			return false;
+
+		return seq > other.seq;
 	}
 
 	bool operator==(const id_t &other) const {
