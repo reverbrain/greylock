@@ -714,8 +714,9 @@ private:
 			ILOG_ERROR("there is no 'path' string in rocksdb config");
 			return false;
 		}
+		bool ro = greylock::get_bool(rconf, "read_only", false);
 
-		auto err = m_db.open(path);
+		auto err = m_db.open(path, ro);
 		if (err) {
 			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;

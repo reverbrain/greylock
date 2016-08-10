@@ -291,71 +291,13 @@ public:
 	}
 };
 
-class read_only_database {
-public:
-	greylock::error_info open(const std::string &path) {
-		rocksdb::Options options;
-		options.max_open_files = 1000;
-		options.merge_operator.reset(new disk_index_merge_operator);
-
-		rocksdb::BlockBasedTableOptions table_options;
-		table_options.block_cache = rocksdb::NewLRUCache(100 * 1048576); // 100MB of uncompresseed data cache
-		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, true));
-		options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
-
-		rocksdb::DB *db;
-
-		rocksdb::Status s = rocksdb::DB::OpenForReadOnly(options, path, &db);
-		if (!s.ok()) {
-			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
-					path.c_str(), s.ToString().c_str());
-		}
-		m_db.reset(db);
-
-		return greylock::error_info();
-	}
-
-	greylock::error_info read(const std::string &key, std::string *ret) {
-		auto s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
-		if (!s.ok()) {
-			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
-		}
-		return greylock::error_info();
-	}
-
-	std::vector<size_t> get_shards(const std::string &key) {
-		disk_token dt;
-
-		std::string ser_shards;
-		auto err = read(key, &ser_shards);
-		if (err) {
-			//printf("could not read shards, key: %s, err: %s [%d]\n", key.c_str(), err.message().c_str(), err.code());
-			return dt.shards;
-		}
-
-		err = deserialize(dt, ser_shards.data(), ser_shards.size());
-		if (err)
-			return dt.shards;
-
-		return dt.shards;
-	}
-
-	const greylock::options &options() const {
-		return m_opts;
-	}
-
-private:
-	std::unique_ptr<rocksdb::DB> m_db;
-	greylock::options m_opts;
-};
-
-
 class database {
 public:
 	~database() {
-		m_expiration_timer.stop();
-
-		sync_metadata(NULL);
+		if (!m_ro) {
+			m_expiration_timer.stop();
+			sync_metadata(NULL);
+		}
 	}
 
 	const greylock::options &options() const {
@@ -366,13 +308,23 @@ public:
 	}
 
 	void compact() {
-		struct rocksdb::CompactRangeOptions opts;
-		opts.change_level = true;
-		opts.target_level = 0;
-		m_db->CompactRange(opts, NULL, NULL);
+		if (m_db) {
+			struct rocksdb::CompactRangeOptions opts;
+			opts.change_level = true;
+			opts.target_level = 0;
+			m_db->CompactRange(opts, NULL, NULL);
+		}
 	}
 
 	greylock::error_info sync_metadata(rocksdb::WriteBatch *batch) {
+		if (m_ro) {
+			return greylock::create_error(-EROFS, "read-only database");
+		}
+
+		if (!m_db) {
+			return greylock::create_error(-EINVAL, "database is not opened");
+		}
+
 		if (!m_meta.dirty())
 			return greylock::error_info();
 
@@ -394,12 +346,23 @@ public:
 		return greylock::error_info();
 	}
 
-	greylock::error_info open(const std::string &path) {
+	greylock::error_info open_read_only(const std::string &path) {
+		return open(path, true);
+	}
+	greylock::error_info open_read_write(const std::string &path) {
+		return open(path, false);
+	}
+
+	greylock::error_info open(const std::string &path, bool ro) {
+		if (m_db) {
+			return greylock::create_error(-EINVAL, "database is already opened");
+		}
+
 		rocksdb::Options dbo;
 		dbo.max_open_files = 1000;
 		//dbo.disableDataSync = true;
 
-		dbo.compression = rocksdb::kLZ4HCCompression;
+		dbo.compression = rocksdb::kBZip2Compression;
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
@@ -416,13 +379,19 @@ public:
 		dbo.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
 
 		rocksdb::DB *db;
+		rocksdb::Status s;
 
-		rocksdb::Status s = rocksdb::DB::Open(dbo, path, &db);
+		if (ro) {
+			s = rocksdb::DB::OpenForReadOnly(dbo, path, &db);
+		} else {
+			s = rocksdb::DB::Open(dbo, path, &db);
+		}
 		if (!s.ok()) {
-			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', error: %s",
-					path.c_str(), s.ToString().c_str());
+			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', read-only: %d, error: %s",
+					path.c_str(), ro, s.ToString().c_str());
 		}
 		m_db.reset(db);
+		m_ro = ro;
 
 		std::string meta;
 		s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(m_opts.metadata_key), &meta);
@@ -438,7 +407,7 @@ public:
 					m_opts.metadata_key.c_str(), err.message().c_str());
 		}
 
-		if (m_opts.sync_metadata_timeout > 0) {
+		if (m_opts.sync_metadata_timeout > 0 && !ro) {
 			sync_metadata_callback();
 		}
 
@@ -447,6 +416,9 @@ public:
 
 	std::vector<size_t> get_shards(const std::string &key) {
 		disk_token dt;
+		if (!m_db) {
+			return dt.shards;
+		}
 
 		std::string ser_shards;
 		auto err = read(key, &ser_shards);
@@ -461,6 +433,10 @@ public:
 	}
 
 	greylock::error_info read(const std::string &key, std::string *ret) {
+		if (!m_db) {
+			return greylock::create_error(-EINVAL, "database is not opened");
+		}
+
 		auto s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
@@ -469,6 +445,14 @@ public:
 	}
 
 	greylock::error_info write(rocksdb::WriteBatch *batch) {
+		if (!m_db) {
+			return greylock::create_error(-EINVAL, "database is not opened");
+		}
+
+		if (m_ro) {
+			return greylock::create_error(-EROFS, "read-only database");
+		}
+
 		auto wo = rocksdb::WriteOptions();
 
 		auto s = m_db->Write(wo, batch);
@@ -480,6 +464,7 @@ public:
 	}
 
 private:
+	bool m_ro = false;
 	std::unique_ptr<rocksdb::DB> m_db;
 	greylock::options m_opts;
 	greylock::metadata m_meta;

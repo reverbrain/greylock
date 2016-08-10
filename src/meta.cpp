@@ -81,8 +81,8 @@ int main(int argc, char *argv[])
 	}
 
 	try {
-		greylock::read_only_database db;
-		auto err = db.open(path);
+		greylock::database db;
+		auto err = db.open_read_only(path);
 		if (err) {
 			std::cerr << "could not open database: " << err.message();
 			return err.code();
@@ -131,8 +131,8 @@ int main(int argc, char *argv[])
 			}
 			cmp.push_back(iname.substr(pos));
 
-			for (auto it = greylock::index_iterator<greylock::read_only_database>::begin(db, cmp[0], cmp[1], cmp[2]),
-					end = greylock::index_iterator<greylock::read_only_database>::end(db, cmp[0], cmp[1], cmp[2]);
+			for (auto it = greylock::index_iterator<greylock::database>::begin(db, cmp[0], cmp[1], cmp[2]),
+					end = greylock::index_iterator<greylock::database>::end(db, cmp[0], cmp[1], cmp[2]);
 					it != end;
 					++it) {
 
