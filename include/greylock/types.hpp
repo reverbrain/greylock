@@ -148,13 +148,11 @@ struct indexes {
 
 struct content {
 	std::vector<std::string> content;
-	std::vector<std::string> stemmed_content;
 	std::vector<std::string> title;
-	std::vector<std::string> stemmed_title;
 	std::vector<std::string> links;
 	std::vector<std::string> images;
 
-	MSGPACK_DEFINE(content, stemmed_content, title, stemmed_title, links, images);
+	MSGPACK_DEFINE(content, title, links, images);
 };
 
 struct document {
