@@ -116,7 +116,6 @@ public:
 			}
 		};
 
-
 		// contains vector of iterators pointing to the requested indexes
 		// iterator always points to the smallest document ID not yet pushed into resulting structure (or to client)
 		// or discarded (if other index iterators point to larger document IDs)
@@ -133,6 +132,17 @@ public:
 				}
 
 				idata.emplace_back(itr);
+			}
+		}
+
+		std::vector<iter> inegation;
+		for (const auto &attr: indexes.negation) {
+			for (const auto &t: attr.tokens) {
+				std::string shard_key = document::generate_shard_key(m_db.options(), mbox, attr.name, t.name);
+				auto shards = m_db.get_shards(shard_key);
+
+				iter itr(m_db, mbox, attr.name, t.name, shards);
+				inegation.emplace_back(itr);
 			}
 		}
 
@@ -278,24 +288,47 @@ public:
 				continue;
 			}
 
-			single_doc_result rs;
 			auto &min_it = idata[pos.front()].begin;
+			id_t indexed_id = min_it->indexed_id;
+
+			bool negation_match = false;
+			for (auto &neg: inegation) {
+				auto &it = neg.begin;
+				it.rewind_to_index(indexed_id);
+				if (it != neg.end) {
+					if (it->indexed_id == indexed_id) {
+						negation_match = true;
+						break;
+					}
+				}
+			}
+
+			auto increment_all_iterators = [&] () {
+				for (auto it = pos.begin(); it != pos.end(); ++it) {
+					auto &idata_iter = idata[*it].begin;
+					++idata_iter;
+				}
+			};
+
+			if (negation_match) {
+				increment_all_iterators();
+				continue;
+			}
+
+			single_doc_result rs;
 			auto err = min_it.document(&rs.doc);
 			if (err) {
 #if 0
 				printf("could not read document id: %ld, err: %s [%d]\n",
 						min_it->indexed_id, err.message().c_str(), err.code());
 #endif
+				increment_all_iterators();
 				continue;
 			}
-			rs.doc.indexed_id = min_it->indexed_id;
+			rs.doc.indexed_id = indexed_id;
 
 			// increment all iterators
-			for (auto it = pos.begin(); it != pos.end(); ++it) {
-				auto &idata_iter = idata[*it].begin;
-
-				++idata_iter;
-			}
+			increment_all_iterators();
 
 			if (!check(rs)) {
 				continue;
