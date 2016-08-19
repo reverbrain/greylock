@@ -179,19 +179,6 @@ public:
 		bool check_result(const greylock::indexes &idx, greylock::single_doc_result &sd) {
 			const greylock::document &doc = sd.doc;
 
-			for (const auto &attr: idx.negation) {
-				bool should_drop;
-
-				if (attr.name.find("title") != std::string::npos) {
-					should_drop = check_negation(attr.tokens, doc.ctx.stemmed_title);
-				} else {
-					should_drop = check_negation(attr.tokens, doc.ctx.stemmed_content);
-				}
-
-				if (should_drop)
-					return false;
-			}
-
 			for (const auto &attr: idx.exact) {
 				bool match;
 
@@ -468,9 +455,7 @@ public:
 		}
 		greylock::error_info parse_content(const rapidjson::Value &ctx, greylock::document &doc) {
 			doc.ctx.content = get_string_vector(ctx, "content");
-			doc.ctx.stemmed_content = get_string_vector(ctx, "stemmed_content");
 			doc.ctx.title = get_string_vector(ctx, "title");
-			doc.ctx.stemmed_title = get_string_vector(ctx, "stemmed_title");
 			doc.ctx.links = get_string_vector(ctx, "links");
 			doc.ctx.images = get_string_vector(ctx, "images");
 
