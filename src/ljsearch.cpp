@@ -51,10 +51,133 @@ struct post {
 	}
 };
 
+template <typename T>
+struct use_control {
+	T word;
+	size_t position;
+
+	use_control(const T &w, size_t pos): word(w), position(pos) {}
+};
+
+template <typename T>
+struct lru_element {
+	T token;
+	int count;
+
+	lru_element(lru_element &&other) {
+		token = std::move(other.token);
+		count = other.count;
+	}
+	lru_element &operator=(lru_element &&other) {
+		token = std::move(other.token);
+		count = other.count;
+		return *this;
+	}
+
+	lru_element(const T &t): token(t), count(1) {}
+	lru_element(): count(0) {}
+};
+
+template <typename T>
+class lru {
+public:
+	lru(size_t limit): m_limit(limit) {}
+
+	lru_element<T> insert(const T &t) {
+		lru_element<T> ret;
+		if (m_lru.size() == m_limit - 1) {
+			lru_element<T> ret = std::move(m_lru.back());
+			m_lru.pop_back();
+		}
+
+		m_lru.emplace_back(t);
+		ret.count = m_lru.size() - 1;
+		return ret;
+	}
+
+	size_t touch(size_t pos) {
+		if (m_lru.size() <= pos) {
+			ribosome::throw_error(-EINVAL, "invalid position: %ld, lru-size: %ld", pos, m_lru.size());
+		}
+
+		auto &e = m_lru[pos];
+		if (e.count < 2)
+			e.count++;
+
+		if (pos > 0) {
+			auto &prev = m_lru[pos - 1];
+			if (e.count > prev.count) {
+				std::swap(e, prev);
+				return pos - 1;
+			}
+
+			return pos;
+		}
+
+		return pos;
+	}
+
+private:
+	size_t m_limit;
+	std::deque<lru_element<T>> m_lru;
+};
+
+template <typename W, typename S>
+class word_cache {
+public:
+	word_cache(int limit): m_lru(limit), m_check(std::chrono::system_clock::now() + std::chrono::seconds(10)) {}
+
+	void insert(const W &word, const S &stem) {
+		lru_element<W> ret = m_lru.insert(word);
+		if (ret.token.size()) {
+			m_removed++;
+			m_words.erase(ret.token);
+		}
+
+		m_words.insert(std::pair<W, use_control<S>>(word, use_control<S>(stem, ret.count)));
+		m_inserted++;
+	}
+
+	S *get(const W &word) {
+		auto it = m_words.find(word);
+		if (it == m_words.end()) {
+			m_miss++;
+			return NULL;
+		}
+
+		m_hit++;
+
+		if (std::chrono::system_clock::now() > m_check) {
+			printf("hit: %.1f, total: %ld, removed: %ld, inserted: %ld, cache_size: %ld\n",
+					(float)m_hit / (float)(m_hit + m_miss) * 100.0, m_hit + m_miss, m_removed, m_inserted,
+					m_words.size());
+			m_hit = 0;
+			m_miss = 0;
+			m_removed = 0;
+			m_inserted = 0;
+			m_check = std::chrono::system_clock::now() + std::chrono::seconds(10);
+		}
+
+		size_t new_pos = m_lru.touch(it->second.position);
+		it->second.position = new_pos;
+		return &it->second.word;
+	}
+
+private:
+	lru<W> m_lru;
+	std::unordered_map<W, use_control<S>> m_words;
+
+	size_t m_hit = 0;
+	size_t m_miss = 0;
+	size_t m_removed = 0;
+	size_t m_inserted = 0;
+	std::chrono::system_clock::time_point m_check;
+};
+
 class lj_worker {
 public:
-	lj_worker(greylock::database &db, warp::language_checker &lch):
-		m_db(db), m_lch(lch)
+	lj_worker(greylock::database &db, warp::language_checker &lch, size_t cache_size):
+		m_db(db), m_lch(lch), m_cache(cache_size)
 	{
 	}
 
@@ -110,6 +233,8 @@ public:
 private:
 	greylock::database &m_db;
 	warp::language_checker &m_lch;
+
+	word_cache<std::string, std::string> m_cache;
 
 	ribosome::html_parser m_html;
 	warp::stemmer m_stemmer;
@@ -181,9 +306,24 @@ private:
 					std::string word = ribosome::lconvert::to_string(idx);
 
 					if (idx.size() >= m_db.options().ngram_index_size) {
+#if 1
+						std::string *stem_ptr = m_cache.get(word);
+						if (!stem_ptr) {
+							std::string lang = m_lch.language(word, idx);
+							std::string stem = m_stemmer.stem(word, lang, "");
+							m_cache.insert(word, stem);
+
+							stems.emplace(stem);
+						} else {
+							stems.insert(*stem_ptr);
+						}
+#else
 						std::string lang = m_lch.language(word, idx);
 						std::string stem = m_stemmer.stem(word, lang, "");
+						m_cache.insert(word, stem);
+
 						stems.emplace(stem);
+#endif
 					} else {
 						if (pos > 0) {
 							auto &prev = all_words[pos - 1];
@@ -314,13 +454,13 @@ private:
 
 class lj_parser {
 public:
-	lj_parser(int n) {
+	lj_parser(int n, size_t cache_size) {
 		m_pool.reserve(n);
 		m_workers.reserve(n);
 
 		for (int i = 0; i < n; ++i) {
 			m_pool.emplace_back(std::bind(&lj_parser::callback, this, i));
-			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch)));
+			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cache_size)));
 		}
 	}
 
@@ -411,12 +551,14 @@ int main(int argc, char *argv[])
 	std::string input, output, lang_path;
 	size_t rewind = 0;
 	int thread_num;
+	size_t cache_size;
 	generic.add_options()
 		("help", "This help message")
 		("input", bpo::value<std::string>(&input)->required(), "Livejournal dump file packed with bzip2")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("threads", bpo::value<int>(&thread_num)->default_value(6), "Number of parser threads")
+		("word-cache", bpo::value<size_t>(&cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
 		("cached-documents", bpo::value<size_t>(&cached_documents)->default_value(20000),
 			"Number of cached documents per thread prior merging its indexes and writing them into database")
 		("lang_stats", bpo::value<std::string>(&lang_path)->required(), "Language stats file")
@@ -444,7 +586,7 @@ int main(int argc, char *argv[])
 	}
 
 
-	lj_parser parser(thread_num);
+	lj_parser parser(thread_num, cache_size);
 	auto err = parser.load_langdetect_stats(lang_path);
 	if (err) {
 		std::cerr << "could not open load language stats: " << err.message() << std::endl;
