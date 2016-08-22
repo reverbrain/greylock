@@ -4,6 +4,7 @@
 
 #include <iterator>
 
+//#define STDOUT_DEBUG
 #ifdef STDOUT_DEBUG
 #define dprintf(fmt, a...) printf(fmt, ##a)
 #else
@@ -82,7 +83,7 @@ public:
 
 	self_type &rewind_to_index(const id_t &idx) {
 		size_t rewind_shard = document::generate_shard_number(m_db.options(), idx);
-		dprintf("rewind: %s, idx: %ld, rewind_shard: %ld\n", to_string().c_str(), idx, rewind_shard);
+		dprintf("rewind: %s, idx: %s, rewind_shard: %ld\n", to_string().c_str(), idx.to_string().c_str(), rewind_shard);
 
 		auto rewind_shard_it = std::lower_bound(m_shards.begin(), m_shards.end(), rewind_shard);
 		if (rewind_shard_it == m_shards.end()) {
@@ -148,8 +149,8 @@ public:
 			", next_shard_idx: " << m_shards_idx <<
 			", shards: [" << dump_shards() << "] " <<
 			", ids_size: " << m_current.ids.size() <<
-			", is_end: " << (m_idx_current == m_idx_end) <<
-			", indexed_id: " << (m_idx_current == m_idx_end) ? 0 : m_idx_current->indexed_id;
+			", current_is_end: " << (m_idx_current == m_idx_end) <<
+			", indexed_id: " << ((m_idx_current == m_idx_end) ? "none" : m_idx_current->indexed_id.to_string());
 		return ss.str();
 	}
 
@@ -200,8 +201,13 @@ private:
 		}
 	}
 
-
 	void load_next() {
+		do {
+			load_next_one();
+		} while (m_shards_idx >= 0 && m_current.ids.empty());
+	}
+
+	void load_next_one() {
 		dprintf("loading: %s\n", to_string().c_str());
 		m_current.ids.clear();
 		m_idx_current = m_current.ids.begin();
