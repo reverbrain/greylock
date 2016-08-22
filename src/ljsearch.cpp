@@ -22,6 +22,7 @@
 using namespace ioremap;
 
 static const std::string drop_characters = "`~-=!@#$%^&*()_+[]\\{}|';\":/.,?><\n\r\t";
+static size_t cached_documents = 0;
 
 struct post {
 	bool is_comment = false;
@@ -52,7 +53,8 @@ struct post {
 
 class lj_worker {
 public:
-	lj_worker(greylock::database &db, warp::language_checker &lch): m_db(db), m_lch(lch)
+	lj_worker(greylock::database &db, warp::language_checker &lch):
+		m_db(db), m_lch(lch)
 	{
 	}
 
@@ -224,7 +226,7 @@ private:
 		doc.idx.attributes.emplace_back(urls);
 
 		m_docs.emplace_back(doc);
-		if (m_docs.size() > 10240 * 4) {
+		if (m_docs.size() > cached_documents) {
 			write_documents();
 		}
 
@@ -415,9 +417,11 @@ int main(int argc, char *argv[])
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("threads", bpo::value<int>(&thread_num)->default_value(6), "Number of parser threads")
+		("cached-documents", bpo::value<size_t>(&cached_documents)->default_value(20000),
+			"Number of cached documents per thread prior merging its indexes and writing them into database")
 		("lang_stats", bpo::value<std::string>(&lang_path)->required(), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
-		 	"Language models, format: language:model_path")
+			"Language models, format: language:model_path")
 		;
 
 	bpo::options_description cmdline_options;
