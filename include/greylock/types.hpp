@@ -228,12 +228,14 @@ struct document {
 	}
 
 	void generate_token_keys(const options &options) {
+		size_t shard_number = generate_shard_number(options, indexed_id);
+
 		for (auto &attr: idx.attributes) {
 			for (auto &t: attr.tokens) {
-				t.key = generate_index_key(options, mbox, attr.name, t.name, indexed_id);
+				std::string index_base = generate_index_base(options, mbox, attr.name, t.name);
+				t.key = generate_index_key_shard_number(index_base, shard_number);
 				t.shard_key = generate_shard_key(options, mbox, attr.name, t.name);
 
-				size_t shard_number = generate_shard_number(options, indexed_id);
 				t.shards.insert(shard_number);
 			}
 		}
