@@ -101,12 +101,12 @@ public:
 		}
 
 		auto &e = m_lru[pos];
-		if (e.count < 2)
+		if (e.count < 3)
 			e.count++;
 
 		if (pos > 0) {
 			auto &prev = m_lru[pos - 1];
-			if (e.count > prev.count) {
+			if (e.count >= prev.count) {
 				std::swap(e, prev);
 				return pos - 1;
 			}
