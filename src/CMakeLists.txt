@@ -32,3 +32,9 @@ install(TARGETS	greylock_server greylock_meta
 	RUNTIME DESTINATION bin COMPONENT runtime
 )
 
+add_executable(greylock_ljsearch ljsearch.cpp)
+target_link_libraries(greylock_ljsearch
+	greylock
+	${WARP_LIBRARIES}
+)
+
