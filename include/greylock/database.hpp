@@ -426,8 +426,8 @@ public:
 			std::vector<rocksdb::CompressionType>({
 					rocksdb::kSnappyCompression,
 					rocksdb::kSnappyCompression,
-					rocksdb::kZlibCompression,
-					rocksdb::kZlibCompression,
+					rocksdb::kSnappyCompression,
+					rocksdb::kSnappyCompression,
 				});
 
 		dbo.create_if_missing = true;
