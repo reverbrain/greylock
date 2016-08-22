@@ -15,6 +15,7 @@
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/status.h>
+#include <rocksdb/statistics.h>
 #include <rocksdb/table.h>
 #include <rocksdb/utilities/transaction_db.h>
 #pragma GCC diagnostic pop
@@ -30,13 +31,13 @@
 namespace ioremap { namespace greylock {
 
 struct options {
-	size_t tokens_shard_size = 100000*40;
-	long transaction_expiration = 60000; // 60 seconds
-	long transaction_lock_timeout = 60000; // 60 seconds
+	size_t tokens_shard_size = 5000000;
+
+	int max_threads = 8;
 
 	int bits_per_key = 10; // bloom filter parameter
 
-	long lru_cache_size = 100 * 1024 * 1024; // 100 MB of uncompressed data cache
+	long lru_cache_size = 1000 * 1024 * 1024; // 1000 MB of uncompressed data cache
 
 	long sync_metadata_timeout = 60000; // 60 seconds
 
@@ -45,7 +46,7 @@ struct options {
 	// with the previous and next tokens.
 	// This options greatly speeds up requests with small words (like [to be or not to be]),
 	// but heavily increases index size.
-	unsigned int ngram_index_size = 0;
+	unsigned int ngram_index_size = 3;
 
 	std::string document_prefix;
 	std::string token_shard_prefix;
@@ -135,6 +136,10 @@ struct document_for_index {
 	}
 };
 
+namespace {
+	static const uint32_t disk_cookie = 0x45589560;
+}
+
 struct disk_index {
 	typedef document_for_index value_type;
 	typedef document_for_index& reference;
@@ -142,7 +147,35 @@ struct disk_index {
 
 	std::vector<document_for_index> ids;
 
-	MSGPACK_DEFINE(ids);
+	template <typename Stream>
+	void msgpack_pack(msgpack::packer<Stream> &o) const {
+		o.pack_array(2);
+		o.pack(disk_cookie);
+		o.pack(ids);
+	}
+
+	void msgpack_unpack(msgpack::object o) {
+		if (o.type != msgpack::type::ARRAY) {
+			std::ostringstream ss;
+			ss << "could not unpack disk index, object type is " << o.type <<
+				", must be array (" << msgpack::type::ARRAY << ")";
+			throw std::runtime_error(ss.str());
+		}
+
+		uint32_t cookie;
+
+		msgpack::object *p = o.via.array.ptr;
+		p[0].convert(&cookie);
+
+		if (cookie != disk_cookie) {
+			std::ostringstream ss;
+			ss << "could not unpack disk index, cookie mismatch: " << std::hex << cookie <<
+				", must be: " << std::hex << disk_cookie;
+			throw std::runtime_error(ss.str());
+		}
+
+		p[1].convert(&ids);
+	}
 };
 
 struct disk_token {
@@ -166,7 +199,7 @@ public:
 			std::string* new_value,
 			rocksdb::Logger *logger) const {
 
-		struct greylock::disk_index index;
+		disk_index index;
 		greylock::error_info err;
 		std::set<document_for_index> unique_index;
 
@@ -182,21 +215,38 @@ public:
 		}
 
 		for (const auto& value : operand_list) {
-			document_for_index did;
-			err = deserialize(did, value.data(), value.size());
-			if (err) {
-				rocksdb::Error(logger, "merge: key: %s, document deserialize failed: %s [%d]",
-						key.ToString().c_str(), err.message().c_str(), err.code());
+			msgpack::unpacked msg;
+			msgpack::unpack(&msg, value.data(), value.size());
+
+			try {
+				msgpack::object o = msg.get();
+
+				if (o.type != msgpack::type::ARRAY) {
+					document_for_index did;
+					o.convert(&did);
+					unique_index.emplace(did);
+					continue;
+				}
+
+				disk_index idx;
+				o.convert(&idx);
+
+				unique_index.insert(idx.ids.begin(), idx.ids.end());
+			} catch (const std::exception &e) {
+				rocksdb::Error(logger, "merge: key: %s, document deserialize failed: %s",
+						key.ToString().c_str(), e.what());
 				return false;
 			}
-
-			unique_index.emplace(did);
-			//printf("full merge: key: %s, indexed_id: %ld\n", key.ToString().c_str(), did.indexed_id);
 		}
 
 		index.ids.clear();
 		index.ids.insert(index.ids.end(), unique_index.begin(), unique_index.end());
 		*new_value = serialize(index);
+
+		if (new_value->size() > 1024 * 1024) {
+			rocksdb::Warn(logger, "index_merge: key: %s, size: %ld -> %ld",
+					key.ToString().c_str(), old_value->size(), new_value->size());
+		}
 
 		return true;
 	}
@@ -245,6 +295,11 @@ public:
 
 		dt.shards = std::vector<size_t>(shards.begin(), shards.end());
 		*new_value = serialize(dt);
+
+		if (new_value->size() > 1024 * 1024) {
+			rocksdb::Warn(logger, "shard_merge: key: %s, size: %ld -> %ld",
+					key.ToString().c_str(), old_value->size(), new_value->size());
+		}
 
 		return true;
 	}
@@ -361,20 +416,30 @@ public:
 		rocksdb::Options dbo;
 		dbo.max_open_files = 1000;
 		//dbo.disableDataSync = true;
+		dbo.IncreaseParallelism(m_opts.max_threads);
 
-		dbo.compression = rocksdb::kBZip2Compression;
+		dbo.max_bytes_for_level_base = 1024 * 1024 * 1024;
+
+		dbo.compression = rocksdb::kZlibCompression;
+		dbo.num_levels = 4;
+		dbo.compression_per_level =
+			std::vector<rocksdb::CompressionType>({
+					rocksdb::kSnappyCompression,
+					rocksdb::kSnappyCompression,
+					rocksdb::kZlibCompression,
+					rocksdb::kZlibCompression,
+				});
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
 
 		dbo.merge_operator.reset(new disk_index_merge_operator);
 
-		//dbo.prefix_extractor.reset(NewFixedPrefixTransform(3));
-		//dbo.memtable_prefix_bloom_bits = 100000000;
-		//dbo.memtable_prefix_bloom_probes = 6;
+		dbo.statistics = rocksdb::CreateDBStatistics();
+		dbo.stats_dump_period_sec = 60;
 
 		rocksdb::BlockBasedTableOptions table_options;
-		table_options.block_cache = rocksdb::NewLRUCache(m_opts.lru_cache_size); // 100MB of uncompresseed data cache
+		table_options.block_cache = rocksdb::NewLRUCache(m_opts.lru_cache_size);
 		table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(m_opts.bits_per_key, true));
 		dbo.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
 
