@@ -19,10 +19,42 @@
 #include <warp/language_model.hpp>
 #include <warp/stem.hpp>
 
+#include <signal.h>
+
 using namespace ioremap;
 
-static const std::string drop_characters = "`~-=!@#$%^&*()_+[]\\{}|';\":/.,?><\n\r\t";
-static size_t cached_documents = 0;
+static const std::string drop_characters = "`~-=!@#$%^&*()_+[]\\{}|';\":/.,?><\n\r\t ";
+static ribosome::alphabet supported_alphabet;
+
+static bool global_need_exit = false;
+
+static void signal_handler(int signo)
+{
+	(void) signo;
+
+	global_need_exit = true;
+}
+
+static inline const char *print_time(long tsec, long tnsec)
+{
+	char str[64];
+	struct tm tm;
+
+	static __thread char __dnet_print_time[128];
+
+	localtime_r((time_t *)&tsec, &tm);
+	strftime(str, sizeof(str), "%F %R:%S", &tm);
+
+	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) tnsec / 1000);
+	return __dnet_print_time;
+}
+
+
+struct cache_control {
+	size_t word_cache_size = 1000000;
+	size_t doc_cache_size = 10000;
+};
+
 
 struct post {
 	bool is_comment = false;
@@ -65,13 +97,16 @@ struct lru_element {
 	int count;
 
 	lru_element(lru_element &&other) {
-		token = std::move(other.token);
-		count = other.count;
+		swap(*this, other);
 	}
 	lru_element &operator=(lru_element &&other) {
-		token = std::move(other.token);
-		count = other.count;
+		swap(*this, other);
 		return *this;
+	}
+
+	friend void swap(lru_element<T> &f, lru_element<T> &s) {
+		std::swap(f.token, s.token);
+		std::swap(f.count, s.count);
 	}
 
 	lru_element(const T &t): token(t), count(1) {}
@@ -86,7 +121,7 @@ public:
 	lru_element<T> insert(const T &t) {
 		lru_element<T> ret;
 		if (m_lru.size() == m_limit - 1) {
-			lru_element<T> ret = std::move(m_lru.back());
+			swap(ret, m_lru.back());
 			m_lru.pop_back();
 		}
 
@@ -101,7 +136,7 @@ public:
 		}
 
 		auto &e = m_lru[pos];
-		if (e.count < 3)
+		if (e.count < 4)
 			e.count++;
 
 		if (pos > 0) {
@@ -122,68 +157,74 @@ private:
 	std::deque<lru_element<T>> m_lru;
 };
 
+struct word_cache_stats {
+	size_t hits = 0;
+	size_t misses = 0;
+	size_t removed = 0;
+	size_t inserted = 0;
+};
+
 template <typename W, typename S>
 class word_cache {
 public:
-	word_cache(int limit): m_lru(limit), m_check(std::chrono::system_clock::now() + std::chrono::seconds(10)) {}
+	word_cache(int limit): m_lru(limit) {}
 
 	void insert(const W &word, const S &stem) {
 		lru_element<W> ret = m_lru.insert(word);
 		if (ret.token.size()) {
-			m_removed++;
+			m_cstats.removed++;
 			m_words.erase(ret.token);
 		}
 
 		m_words.insert(std::pair<W, use_control<S>>(word, use_control<S>(stem, ret.count)));
-		m_inserted++;
+		m_cstats.inserted++;
 	}
 
 	S *get(const W &word) {
 		auto it = m_words.find(word);
 		if (it == m_words.end()) {
-			m_miss++;
+			m_cstats.misses++;
 			return NULL;
 		}
 
-		m_hit++;
-
-		if (std::chrono::system_clock::now() > m_check) {
-			printf("hit: %.1f, total: %ld, removed: %ld, inserted: %ld, cache_size: %ld\n",
-					(float)m_hit / (float)(m_hit + m_miss) * 100.0, m_hit + m_miss, m_removed, m_inserted,
-					m_words.size());
-			m_hit = 0;
-			m_miss = 0;
-			m_removed = 0;
-			m_inserted = 0;
-			m_check = std::chrono::system_clock::now() + std::chrono::seconds(10);
-		}
+		m_cstats.hits++;
 
 		size_t new_pos = m_lru.touch(it->second.position);
 		it->second.position = new_pos;
 		return &it->second.word;
 	}
 
+	const word_cache_stats &cstats() const {
+		return m_cstats;
+	}
+
 private:
 	lru<W> m_lru;
 	std::unordered_map<W, use_control<S>> m_words;
 
-	size_t m_hit = 0;
-	size_t m_miss = 0;
-	size_t m_removed = 0;
-	size_t m_inserted = 0;
-	std::chrono::system_clock::time_point m_check;
+	word_cache_stats m_cstats;
+};
+
+struct worker_stats {
+	long documents = 0;
+	long empty_authors = 0;
+	long skipped_documents = 0;
+	long processed_text_size = 0;
+	long skipped_text_size = 0;
+	long written_data_size = 0;
+
+	struct word_cache_stats cstats;
 };
 
 class lj_worker {
 public:
-	lj_worker(greylock::database &db, warp::language_checker &lch, size_t cache_size):
-		m_db(db), m_lch(lch), m_cache(cache_size)
+	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc):
+		m_db(db), m_lch(lch), m_cc(cc), m_word_cache(cc.word_cache_size)
 	{
 	}
 
 	~lj_worker() {
 		write_documents();		
-		std::cout << "processed lines: " << m_lines << ", empty authors: " << m_empty_authors << std::endl;
 	}
 
 	ribosome::error_info process(const std::string &line) {
@@ -221,26 +262,27 @@ public:
 				p.author = "http://" + user + ".livejournal.com";
 
 			}
-
-			if (p.author.empty()) {
-				m_empty_authors++;
-			}
 		}
-		m_lines++;
 
 		return convert_to_document(std::move(p));
 	}
+
+	const worker_stats &wstats() {
+		m_wstats.cstats = m_word_cache.cstats();
+		return m_wstats;
+	}
+
 private:
 	greylock::database &m_db;
 	warp::language_checker &m_lch;
+	cache_control m_cc;
 
-	word_cache<std::string, std::string> m_cache;
+	word_cache<std::string, std::string> m_word_cache;
 
 	ribosome::html_parser m_html;
 	warp::stemmer m_stemmer;
 
-	long m_lines = 0;
-	long m_empty_authors = 0;
+	worker_stats m_wstats;
 
 	std::deque<greylock::document> m_docs;
 
@@ -300,30 +342,27 @@ private:
 				ribosome::lstring lt = ribosome::lconvert::from_utf8(t);
 				auto lower_request = ribosome::lconvert::to_lower(lt);
 
-				auto all_words = spl.convert_split_words(lower_request, drop_characters);
+				size_t processed_text_size = 0;
+
+				auto all_words = spl.convert_split_words_allow_alphabet(lower_request, supported_alphabet);
 				for (size_t pos = 0; pos < all_words.size(); ++pos) {
 					auto &idx = all_words[pos];
 					std::string word = ribosome::lconvert::to_string(idx);
+					ret.push_back(word);
+
+					processed_text_size += word.size();
 
 					if (idx.size() >= m_db.options().ngram_index_size) {
-#if 1
-						std::string *stem_ptr = m_cache.get(word);
+						std::string *stem_ptr = m_word_cache.get(word);
 						if (!stem_ptr) {
 							std::string lang = m_lch.language(word, idx);
 							std::string stem = m_stemmer.stem(word, lang, "");
-							m_cache.insert(word, stem);
+							m_word_cache.insert(word, stem);
 
 							stems.emplace(stem);
 						} else {
 							stems.insert(*stem_ptr);
 						}
-#else
-						std::string lang = m_lch.language(word, idx);
-						std::string stem = m_stemmer.stem(word, lang, "");
-						m_cache.insert(word, stem);
-
-						stems.emplace(stem);
-#endif
 					} else {
 						if (pos > 0) {
 							auto &prev = all_words[pos - 1];
@@ -335,9 +374,11 @@ private:
 							stems.emplace(ribosome::lconvert::to_string(idx + next));
 						}
 					}
-
-					ret.emplace_back(word);
 				}
+
+
+				m_wstats.processed_text_size += processed_text_size;
+				m_wstats.skipped_text_size += t.size() - processed_text_size;
 			}
 
 			for (auto &s: stems) {
@@ -354,6 +395,11 @@ private:
 		doc.ctx.content = std::move(split_content(p.content, &fc));
 		doc.ctx.title = std::move(split_content(p.title, &ft));
 
+		if (doc.ctx.content.empty() && doc.ctx.title.empty()) {
+			m_wstats.skipped_documents++;
+			return ribosome::error_info();
+		}
+
 		for (auto &url: doc.ctx.links) {
 			auto all_urls = spl.convert_split_words(url.c_str(), url.size());
 			for (auto &u: all_urls) {
@@ -366,7 +412,7 @@ private:
 		doc.idx.attributes.emplace_back(urls);
 
 		m_docs.emplace_back(doc);
-		if (m_docs.size() > cached_documents) {
+		if (m_docs.size() > m_cc.doc_cache_size) {
 			write_documents();
 		}
 
@@ -376,10 +422,12 @@ private:
 	ribosome::error_info write_documents() {
 		rocksdb::WriteBatch batch;
 
+		long empty_authors = 0;
 		for (auto &doc: m_docs) {
 			std::string doc_serialized = serialize(doc);
 			std::string dkey = m_db.options().document_prefix + doc.indexed_id.to_string();
 			batch.Put(rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
+			m_wstats.written_data_size += doc_serialized.size();
 
 			auto err = write_document(doc);
 			if (err)
@@ -390,22 +438,26 @@ private:
 				auto err = write_document(doc);
 				if (err)
 					return err;
+			} else {
+				empty_authors++;
 			}
 		}
-
-		m_docs.clear();
 
 		for (auto &p: m_token_indexes) {
 			greylock::disk_index di;
 			di.ids.insert(di.ids.end(), p.second.begin(), p.second.end());
 			std::string sdi = serialize(di);
 			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
+
+			m_wstats.written_data_size += sdi.size();
 		}
 
 		for (auto &p: m_token_shards) {
 			greylock::disk_token dt(p.second);
 			std::string sdt = serialize(dt);
 			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
+
+			m_wstats.written_data_size += sdt.size();
 		}
 
 		auto err = m_db.write(&batch);
@@ -413,6 +465,10 @@ private:
 			return ribosome::create_error(err.code(), "could not write batch: %s", err.message().c_str());
 		}
 
+		m_wstats.documents += m_docs.size();
+		m_wstats.empty_authors += empty_authors;
+
+		m_docs.clear();
 		m_token_indexes.clear();
 		m_token_shards.clear();
 
@@ -452,15 +508,72 @@ private:
 
 };
 
+struct parse_stats {
+	long documents = 0;
+	long skipped_documents = 0;
+	long skipped_text_size = 0;
+	long processed_text_size = 0;
+	long written_data_size = 0;
+
+	word_cache_stats wcstats;
+
+	void merge(const worker_stats &ws) {
+		documents += ws.documents;
+		skipped_documents += ws.skipped_documents;
+		skipped_text_size += ws.skipped_text_size;
+		processed_text_size += ws.processed_text_size;
+		written_data_size += ws.written_data_size;
+
+		wcstats.hits += ws.cstats.hits;
+		wcstats.misses += ws.cstats.misses;
+		wcstats.removed += ws.cstats.removed;
+		wcstats.inserted += ws.cstats.inserted;
+	}
+
+	friend parse_stats operator-(const parse_stats &l, const parse_stats &r) {
+		parse_stats ps = l;
+		ps -= r;
+		return ps;
+	}
+
+	parse_stats &operator-=(const parse_stats &other) {
+		documents -= other.documents;
+		skipped_documents -= other.skipped_documents;
+		skipped_text_size -= other.skipped_text_size;
+		processed_text_size -= other.processed_text_size;
+		written_data_size -= other.written_data_size;
+
+		wcstats.hits -= other.wcstats.hits;
+		wcstats.misses -= other.wcstats.misses;
+		wcstats.removed -= other.wcstats.removed;
+		wcstats.inserted -= other.wcstats.inserted;
+
+		return *this;
+	}
+
+	std::string print_stats() {
+		char buf[1024];
+		size_t sz = snprintf(buf, sizeof(buf),
+			"skipped_documents: %ld, skipped_text: %.2f MBs, processed_text: %.2f MBs, "
+				"written_data: %.2f MBs, cache: hits: %.1f%%",
+			skipped_documents,
+			skipped_text_size / 1024 / 1024.0, processed_text_size / 1024 / 1024.0,
+			written_data_size / 1024 / 1024.0,
+			(float)wcstats.hits / (float)(wcstats.hits + wcstats.misses) * 100.0);
+
+		return std::string(buf, sz);
+	}
+};
+
 class lj_parser {
 public:
-	lj_parser(int n, size_t cache_size) {
+	lj_parser(int n, const struct cache_control &cc) {
 		m_pool.reserve(n);
 		m_workers.reserve(n);
 
 		for (int i = 0; i < n; ++i) {
 			m_pool.emplace_back(std::bind(&lj_parser::callback, this, i));
-			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cache_size)));
+			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cc)));
 		}
 	}
 
@@ -472,10 +585,14 @@ public:
 		}
 	}
 
+	void compact() {
+		m_db.compact();
+	}
+
 	ribosome::error_info open(const std::string &dbpath) {
 		auto err = m_db.open_read_write(dbpath);
 		if (err)
-			return ribosome::create_error(err.code(), err.message().c_str());
+			return ribosome::create_error(err.code(), "%s", err.message().c_str());
 
 		return ribosome::error_info();
 	}
@@ -500,6 +617,16 @@ public:
 		m_pool_wait.notify_one();
 	}
 
+	parse_stats pstats() const {
+		parse_stats ps;
+
+		for (auto &w: m_workers) {
+			auto &wstat = w->wstats();
+			ps.merge(wstat);
+		}
+
+		return ps;
+	}
 
 private:
 	greylock::database m_db;
@@ -513,6 +640,7 @@ private:
 	std::condition_variable m_pool_wait, m_parser_wait;
 	std::vector<std::thread> m_pool;
 
+	parse_stats m_ps;
 
 	void callback(int idx) {
 		auto &worker = m_workers[idx];
@@ -547,19 +675,23 @@ int main(int argc, char *argv[])
 
 	bpo::options_description generic("Parser options");
 
+	std::vector<std::string> als;
 	std::vector<std::string> lang_models;
 	std::string input, output, lang_path;
 	size_t rewind = 0;
 	int thread_num;
-	size_t cache_size;
+	cache_control cc;
+	long print_interval = 100;
 	generic.add_options()
 		("help", "This help message")
 		("input", bpo::value<std::string>(&input)->required(), "Livejournal dump file packed with bzip2")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("threads", bpo::value<int>(&thread_num)->default_value(6), "Number of parser threads")
-		("word-cache", bpo::value<size_t>(&cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
-		("cached-documents", bpo::value<size_t>(&cached_documents)->default_value(20000),
+		("alphabet", bpo::value<std::vector<std::string>>(&als)->composing(), "Allowed alphabet")
+		("print-interval", bpo::value<long>(&print_interval)->default_value(100), "Statistics print interval in milliseconds")
+		("word-cache", bpo::value<size_t>(&cc.word_cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
+		("cached-documents", bpo::value<size_t>(&cc.doc_cache_size)->default_value(20000),
 			"Number of cached documents per thread prior merging its indexes and writing them into database")
 		("lang_stats", bpo::value<std::string>(&lang_path)->required(), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
@@ -585,8 +717,14 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	signal(SIGTERM, signal_handler);
+	signal(SIGINT, signal_handler);
 
-	lj_parser parser(thread_num, cache_size);
+	for (auto &a: als) {
+		supported_alphabet.merge(a);
+	}
+
+	lj_parser parser(thread_num, cc);
 	auto err = parser.load_langdetect_stats(lang_path);
 	if (err) {
 		std::cerr << "could not open load language stats: " << err.message() << std::endl;
@@ -619,7 +757,7 @@ int main(int argc, char *argv[])
 
 
 	namespace bio = boost::iostreams;
-	ribosome::timer tm, realtm;
+	ribosome::timer tm, realtm, last_print;
 
 	std::ifstream file(input, std::ios::in | std::ios::binary);
 	bio::filtering_streambuf<bio::input> bin;
@@ -629,29 +767,46 @@ int main(int argc, char *argv[])
 	std::istream in(&bin);
 
 
-
 	size_t total_size = 0;
-	size_t line_num = 0;
 
 	size_t real_size = 0;
 	size_t real_num = 0;
 
+	parse_stats prev_ps;
+
+	auto print_stats = [&] () -> char * {
+		static char tmp[1024];
+
+		parse_stats ps = parser.pstats();
+		parse_stats dps = ps - prev_ps;
+
+		snprintf(tmp, sizeof(tmp),
+			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, speed: %.2f MB/s %.2f [%.2f] docs/s, %s",
+			print_time(time(NULL), 0),
+			tm.elapsed() / 1000, total_size / (1024 * 1024.0),
+			ps.documents,
+			total_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
+			ps.documents * 1000.0 / (float)realtm.elapsed(), dps.documents * 1000.0 / (float)last_print.elapsed(),
+			ps.print_stats().c_str());
+		prev_ps = ps;
+		last_print.restart();
+		return tmp;
+	};
+
 	std::string line;
-	while (std::getline(in, line)) {
+	while (std::getline(in, line) && !global_need_exit) {
 		total_size += line.size();
-		line_num++;
 
 		if (rewind > 0) {
 			--rewind;
 
-			printf("\r %ld seconds: loaded: %.2f MBs, lines: %ld, speed: %.2f MB/s %.2f lines/s, rewind: %ld  ",
-					tm.elapsed() / 1000, total_size / (1024 * 1024.0), line_num,
-					total_size * 1000.0 / (tm.elapsed() * 1024 * 1024.0), line_num * 1000.0 / (float)tm.elapsed(),
-					rewind);
+			if (last_print.elapsed() > print_interval) {
+				printf("%s, rewind: %ld\n", print_stats(), rewind);
+			}
 
 			if (rewind == 0) {
-				printf("\n");
 				realtm.restart();
+				printf("\n");
 			}
 			continue;
 		}
@@ -661,14 +816,19 @@ int main(int argc, char *argv[])
 
 		parser.queue_work(std::move(line));
 
-		printf("\r %ld seconds: loaded: %.2f MBs, lines: %ld, speed: %.2f MB/s %.2f lines/s  ",
-				tm.elapsed() / 1000, total_size / (1024 * 1024.0), line_num,
-				real_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0), real_num * 1000.0 / (float)realtm.elapsed());
+		if (last_print.elapsed() > print_interval) {
+			printf("%s\n", print_stats());
+		}
 	}
-	printf("\r %ld seconds: loaded: %ld, lines: %ld, speed: %.2f MB/s %.2f lines/s\n",
-			tm.elapsed() / 1000, total_size, line_num,
-			real_size * 1000.0 / (tm.elapsed() * 1024 * 1024.0),
-			real_num * 1000.0 / (float)tm.elapsed());
+	printf("\n%s\n", print_stats());
+
+	tm.restart();
+	printf("Starting compaction\n");
+	parser.compact();
+	printf("Compaction1 completed, time: %ld seconds\n", tm.restart() / 1000);
+	parser.compact();
+	printf("Compaction2 completed, time: %ld seconds\n", tm.restart() / 1000);
+
 
 	return 0;
 }
