@@ -78,6 +78,11 @@ public:
 		return m_seq++;
 	}
 
+	void set_sequence(long seq) {
+		m_dirty = true;
+		m_seq = seq;
+	}
+
 	enum {
 		serialize_version_2 = 2,
 	};
@@ -495,6 +500,10 @@ public:
 			return dt.shards;
 
 		return dt.shards;
+	}
+
+	rocksdb::Iterator *iterator(const rocksdb::ReadOptions &ro) {
+		return m_db->NewIterator(ro);
 	}
 
 	greylock::error_info read(const std::string &key, std::string *ret) {
