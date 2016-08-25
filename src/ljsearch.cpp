@@ -689,6 +689,7 @@ int main(int argc, char *argv[])
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("threads", bpo::value<int>(&thread_num)->default_value(6), "Number of parser threads")
 		("alphabet", bpo::value<std::vector<std::string>>(&als)->composing(), "Allowed alphabet")
+		("compact", "Compact database on exit")
 		("print-interval", bpo::value<long>(&print_interval)->default_value(100), "Statistics print interval in milliseconds")
 		("word-cache", bpo::value<size_t>(&cc.word_cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
 		("cached-documents", bpo::value<size_t>(&cc.doc_cache_size)->default_value(20000),
@@ -822,12 +823,14 @@ int main(int argc, char *argv[])
 	}
 	printf("\n%s\n", print_stats());
 
-	tm.restart();
-	printf("Starting compaction\n");
-	parser.compact();
-	printf("Compaction1 completed, time: %ld seconds\n", tm.restart() / 1000);
-	parser.compact();
-	printf("Compaction2 completed, time: %ld seconds\n", tm.restart() / 1000);
+	if (vm.count("compact")) {
+		tm.restart();
+		printf("Starting compaction\n");
+		parser.compact();
+		printf("Compaction1 completed, time: %ld seconds\n", tm.restart() / 1000);
+		parser.compact();
+		printf("Compaction2 completed, time: %ld seconds\n", tm.restart() / 1000);
+	}
 
 
 	return 0;
