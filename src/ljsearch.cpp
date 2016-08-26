@@ -466,6 +466,11 @@ private:
 			std::string doc_serialized = serialize(doc);
 			std::string dkey = m_db.options().document_prefix + doc.indexed_id.to_string();
 			batch.Put(rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
+
+			std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
+			std::string dids_key = m_db.options().document_id_prefix + doc.id;
+			batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
+
 			m_wstats.written_data_size += doc_serialized.size();
 
 			std::string mbox = doc.mbox;
@@ -482,7 +487,6 @@ private:
 						return err;
 				} else {
 					empty_authors++;
-					exit(-1);
 				}
 			} else {
 				size_t pos = doc.id.rfind('?');
