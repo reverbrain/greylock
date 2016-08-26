@@ -226,6 +226,11 @@ public:
 	}
 
 	~lj_worker() {
+		flush();
+	}
+
+	void flush() {
+		std::lock_guard<std::mutex> guard(m_lock);
 		write_documents();		
 	}
 
@@ -286,6 +291,7 @@ private:
 
 	worker_stats m_wstats;
 
+	std::mutex m_lock;
 	std::deque<greylock::document> m_docs;
 
 	std::map<std::string, std::set<greylock::document_for_index>> m_token_indexes;
@@ -450,6 +456,7 @@ private:
 		doc.idx.attributes.emplace_back(fc);
 		doc.idx.attributes.emplace_back(urls);
 
+		std::lock_guard<std::mutex> guard(m_lock);
 		m_docs.emplace_back(doc);
 		if (m_docs.size() > m_cc.doc_cache_size) {
 			write_documents();
@@ -655,6 +662,12 @@ public:
 
 	void compact() {
 		m_db.compact();
+	}
+
+	void flush() {
+		for (auto &w: m_workers) {
+			w->flush();
+		}
 	}
 
 	ribosome::error_info open(const std::string &dbpath) {
@@ -889,6 +902,8 @@ int main(int argc, char *argv[])
 			printf("%s\n", print_stats());
 		}
 	}
+	parser.flush();
+
 	printf("\n%s\n", print_stats());
 
 	if (vm.count("compact")) {
