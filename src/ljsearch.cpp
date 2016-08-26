@@ -25,6 +25,7 @@ using namespace ioremap;
 
 static const std::string drop_characters = "`~-=!@#$%^&*()_+[]\\{}|';\":/.,?><\n\r\t ";
 static ribosome::alphabet supported_alphabet;
+static ribosome::numbers_alphabet numbers_alphabet;
 
 static bool global_need_exit = false;
 
@@ -207,6 +208,7 @@ private:
 
 struct worker_stats {
 	long documents = 0;
+	long lines = 0;
 	long empty_authors = 0;
 	long skipped_documents = 0;
 	long processed_text_size = 0;
@@ -318,11 +320,38 @@ private:
 	ribosome::error_info convert_to_document(post &&p) {
 		greylock::document doc;
 
-		doc.assign_id("", m_db.metadata().get_sequence(), p.issued, 0);
-		doc.id = std::move(p.id);
+		auto cut_scheme = [&] (const std::string &url) -> std::string {
+			static const std::vector<std::string> schemes({"http://", "https://"});
+			for (const auto &s: schemes) {
+				if (url.find(s) == 0) {
+					return url.substr(s.size());
+				}
+			}
 
-		if (p.author.size())
-			doc.author = std::move(p.author);
+			return url;
+		};
+
+		auto replace_minus = [] (std::string &s) -> void {
+			for (size_t i = 0; i < s.size(); ++i) {
+				if (s[i] == '-') {
+					s[i] = '_';
+				}
+			}
+		};
+
+		doc.assign_id("", m_db.metadata().get_sequence(), p.issued, 0);
+		doc.id = cut_scheme(p.id);
+		replace_minus(doc.id);
+
+		if (p.author.size()) {
+			doc.author = cut_scheme(p.author);
+			replace_minus(doc.author);
+		} else {
+			if (!p.is_comment) {
+				size_t pos = doc.id.find('/');
+				doc.author = doc.id.substr(0, pos);
+			}
+		}
 
 		if (p.is_comment)
 			doc.mbox = "comment";
@@ -330,6 +359,7 @@ private:
 			doc.mbox = "post";
 
 		ribosome::split spl;
+		bool numbers_only = true;
 
 		auto split_content = [&] (const std::string &content, greylock::attribute *a) -> std::vector<std::string> {
 			std::vector<std::string> ret;
@@ -351,6 +381,13 @@ private:
 					ret.push_back(word);
 
 					processed_text_size += word.size();
+
+					if (numbers_alphabet.ok(idx)) {
+						stems.emplace(word);
+						continue;
+					}
+
+					numbers_only = false;
 
 					if (idx.size() >= m_db.options().ngram_index_size) {
 						std::string *stem_ptr = m_word_cache.get(word);
@@ -395,7 +432,9 @@ private:
 		doc.ctx.content = std::move(split_content(p.content, &fc));
 		doc.ctx.title = std::move(split_content(p.title, &ft));
 
-		if (doc.ctx.content.empty() && doc.ctx.title.empty()) {
+		m_wstats.lines++;
+
+		if ((doc.ctx.content.empty() && doc.ctx.title.empty()) || numbers_only) {
 			m_wstats.skipped_documents++;
 			return ribosome::error_info();
 		}
@@ -429,17 +468,39 @@ private:
 			batch.Put(rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
 			m_wstats.written_data_size += doc_serialized.size();
 
+			std::string mbox = doc.mbox;
+
 			auto err = write_document(doc);
 			if (err)
 				return err;
 
-			if (doc.author.size()) {
-				doc.mbox = doc.author + "." + doc.mbox;
-				auto err = write_document(doc);
-				if (err)
-					return err;
+			if (mbox == "post") {
+				if (doc.author.size()) {
+					doc.mbox = "journal." + doc.author + "." + mbox;
+					err = write_document(doc);
+					if (err)
+						return err;
+				} else {
+					empty_authors++;
+					exit(-1);
+				}
 			} else {
-				empty_authors++;
+				size_t pos = doc.id.rfind('?');
+				pos = doc.id.rfind('/', pos);
+				if (pos != 0) {
+					std::string journal = doc.id.substr(0, pos);
+					doc.mbox = "journal." + journal + "." + mbox;
+					err = write_document(doc);
+					if (err)
+						return err;
+				}
+
+				if (doc.author.size()) {
+					doc.mbox = "author." + doc.author + "." + mbox;
+					err = write_document(doc);
+					if (err)
+						return err;
+				}
 			}
 		}
 
@@ -510,6 +571,7 @@ private:
 
 struct parse_stats {
 	long documents = 0;
+	long lines = 0;
 	long skipped_documents = 0;
 	long skipped_text_size = 0;
 	long processed_text_size = 0;
@@ -519,6 +581,7 @@ struct parse_stats {
 
 	void merge(const worker_stats &ws) {
 		documents += ws.documents;
+		lines += ws.lines;
 		skipped_documents += ws.skipped_documents;
 		skipped_text_size += ws.skipped_text_size;
 		processed_text_size += ws.processed_text_size;
@@ -538,6 +601,7 @@ struct parse_stats {
 
 	parse_stats &operator-=(const parse_stats &other) {
 		documents -= other.documents;
+		lines -= other.lines;
 		skipped_documents -= other.skipped_documents;
 		skipped_text_size -= other.skipped_text_size;
 		processed_text_size -= other.processed_text_size;
@@ -782,12 +846,12 @@ int main(int argc, char *argv[])
 		parse_stats dps = ps - prev_ps;
 
 		snprintf(tmp, sizeof(tmp),
-			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, speed: %.2f MB/s %.2f [%.2f] docs/s, %s",
+			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, lines: %ld, speed: %.2f MB/s %.2f [%.2f] lines/s, %s",
 			print_time(time(NULL), 0),
 			tm.elapsed() / 1000, total_size / (1024 * 1024.0),
-			ps.documents,
+			ps.documents, ps.lines,
 			total_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
-			ps.documents * 1000.0 / (float)realtm.elapsed(), dps.documents * 1000.0 / (float)last_print.elapsed(),
+			ps.lines * 1000.0 / (float)realtm.elapsed(), dps.lines * 1000.0 / (float)last_print.elapsed(),
 			ps.print_stats().c_str());
 		prev_ps = ps;
 		last_print.restart();
