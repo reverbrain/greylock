@@ -49,12 +49,14 @@ struct options {
 	unsigned int ngram_index_size = 3;
 
 	std::string document_prefix;
+	std::string document_id_prefix;
 	std::string token_shard_prefix;
 	std::string index_prefix;
 	std::string metadata_key;
 
 	options():
 		document_prefix("documents."),
+		document_id_prefix("document_ids."),
 		token_shard_prefix("token_shards."),
 		index_prefix("index."),
 		metadata_key("greylock.meta.key")
