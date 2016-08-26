@@ -478,7 +478,7 @@ private:
 			std::string dids_key = m_db.options().document_id_prefix + doc.id;
 			batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
 
-			m_wstats.written_data_size += doc_serialized.size();
+			m_wstats.written_data_size += doc_serialized.size() + doc_indexed_id_serialized.size();
 
 			std::string mbox = doc.mbox;
 
