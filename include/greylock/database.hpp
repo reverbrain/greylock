@@ -431,10 +431,10 @@ public:
 		dbo.num_levels = 4;
 		dbo.compression_per_level =
 			std::vector<rocksdb::CompressionType>({
-					rocksdb::kSnappyCompression,
-					rocksdb::kSnappyCompression,
-					rocksdb::kSnappyCompression,
-					rocksdb::kSnappyCompression,
+					rocksdb::kZlibCompression,
+					rocksdb::kZlibCompression,
+					rocksdb::kZlibCompression,
+					rocksdb::kZlibCompression,
 				});
 
 		dbo.create_if_missing = true;
