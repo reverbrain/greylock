@@ -53,7 +53,7 @@ static inline const char *print_time(long tsec, long tnsec)
 
 struct cache_control {
 	size_t word_cache_size = 1000000;
-	size_t doc_cache_size = 10000;
+	size_t index_cache_sync_interval = 60;
 };
 
 
@@ -218,20 +218,184 @@ struct worker_stats {
 	struct word_cache_stats cstats;
 };
 
+class index_cache {
+public:
+	index_cache(greylock::database &db) : m_db(db) {}
+
+	ribosome::error_info index(greylock::document &doc) {
+		std::string mbox = doc.mbox;
+
+		auto err = generate_indexes(doc);
+		if (err) {
+			return ribosome::create_error(err.code(),
+					"id: %s, indexed_id: %s, could not generate index1 for mbox %s: %s",
+					doc.id.c_str(), doc.indexed_id.to_string().c_str(),
+					doc.mbox.c_str(), err.message().c_str());
+		}
+
+		if (mbox == "post") {
+			if (doc.author.size()) {
+				doc.mbox = "journal." + doc.author + "." + mbox;
+				err = generate_indexes(doc);
+				if (err) {
+					return ribosome::create_error(err.code(),
+							"id: %s, indexed_id: %s, could not generate index2 for mbox %s: %s",
+							doc.id.c_str(), doc.indexed_id.to_string().c_str(),
+							doc.mbox.c_str(), err.message().c_str());
+				}
+			} else {
+				m_empty_authors++;
+			}
+		} else {
+			size_t pos = doc.id.rfind('?');
+			pos = doc.id.rfind('/', pos);
+			if (pos != 0) {
+				std::string journal = doc.id.substr(0, pos);
+				doc.mbox = "journal." + journal + "." + mbox;
+				err = generate_indexes(doc);
+				if (err) {
+					return ribosome::create_error(err.code(),
+							"id: %s, indexed_id: %s, could not generate index3 for mbox %s: %s",
+							doc.id.c_str(), doc.indexed_id.to_string().c_str(),
+							doc.mbox.c_str(), err.message().c_str());
+				}
+			}
+
+			if (doc.author.size()) {
+				doc.mbox = "author." + doc.author + "." + mbox;
+				err = generate_indexes(doc);
+				if (err) {
+					return ribosome::create_error(err.code(),
+							"id: %s, indexed_id: %s, could not generate index4 for mbox %s: %s",
+							doc.id.c_str(), doc.indexed_id.to_string().c_str(),
+							doc.mbox.c_str(), err.message().c_str());
+				}
+			}
+		}
+
+		m_documents++;
+
+		doc.mbox = mbox;
+		return ribosome::error_info();
+	}
+
+	ribosome::error_info write_indexes(worker_stats *wstats) {
+		rocksdb::WriteBatch batch;
+
+		for (auto &p: m_token_indexes) {
+			greylock::disk_index di;
+			di.ids.insert(di.ids.end(), p.second.begin(), p.second.end());
+			std::string sdi = serialize(di);
+			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
+
+			wstats->written_data_size += sdi.size();
+		}
+
+		for (auto &p: m_token_shards) {
+			greylock::disk_token dt(p.second);
+			std::string sdt = serialize(dt);
+			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
+
+			wstats->written_data_size += sdt.size();
+		}
+
+		auto err = m_db.write(&batch);
+		if (err) {
+			return ribosome::create_error(err.code(), "could not write batch: %s", err.message().c_str());
+		}
+
+		wstats->documents += m_documents;
+		wstats->empty_authors += m_empty_authors;
+
+		clear();
+		return ribosome::error_info();
+	}
+
+	void clear() {
+		m_token_indexes.clear();
+		m_token_shards.clear();
+		m_documents = 0;
+		m_empty_authors = 0;
+	}
+
+	void insert(const index_cache &other) {
+		for (auto &p: other.m_token_indexes) {
+			auto it = m_token_indexes.find(p.first);
+			if (it == m_token_indexes.end()) {
+				m_token_indexes[p.first] = p.second;
+			} else {
+				it->second.insert(p.second.begin(), p.second.end());
+			}
+		}
+
+		for (auto &p: other.m_token_shards) {
+			auto it = m_token_shards.find(p.first);
+			if (it == m_token_shards.end()) {
+				m_token_shards[p.first] = p.second;
+			} else {
+				it->second.insert(p.second.begin(), p.second.end());
+			}
+		}
+
+		m_documents += other.m_documents;
+		m_empty_authors += other.m_empty_authors;
+	}
+
+private:
+	greylock::database &m_db;
+
+	std::map<std::string, std::set<greylock::document_for_index>> m_token_indexes;
+	std::map<std::string, std::set<size_t>> m_token_shards;
+
+	long m_documents = 0;
+	long m_empty_authors = 0;
+
+	ribosome::error_info generate_indexes(greylock::document &doc) {
+		doc.generate_token_keys(m_db.options());
+
+		greylock::document_for_index did;
+		did.indexed_id = doc.indexed_id;
+
+		for (const auto &attr: doc.idx.attributes) {
+			for (const auto &t: attr.tokens) {
+				auto it = m_token_indexes.find(t.key);
+				if (it == m_token_indexes.end()) {
+					std::set<greylock::document_for_index> tmp;
+					tmp.insert(did);
+					m_token_indexes[t.key] = std::move(tmp);
+				} else {
+					it->second.insert(did);
+				}
+
+				auto sh = m_token_shards.find(t.shard_key);
+				if (sh == m_token_shards.end()) {
+					std::set<size_t> tmp;
+					tmp.insert(t.shards.begin(), t.shards.end());
+					m_token_shards[t.shard_key] = std::move(tmp);
+				} else {
+					sh->second.insert(t.shards.begin(), t.shards.end());
+				}
+			}
+		}
+
+		return ribosome::error_info();
+	}
+};
+
 class lj_worker {
 public:
 	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc):
-		m_db(db), m_lch(lch), m_cc(cc), m_word_cache(cc.word_cache_size)
+		m_db(db), m_lch(lch), m_word_cache(cc.word_cache_size), m_index_cache(db)
 	{
 	}
 
 	~lj_worker() {
-		flush();
 	}
 
-	void flush() {
+	void merge_index_cache(index_cache &dst) {
 		std::lock_guard<std::mutex> guard(m_lock);
-		write_documents();		
+		dst.insert(m_index_cache);
+		m_index_cache.clear();
 	}
 
 	ribosome::error_info process(const std::string &line) {
@@ -282,7 +446,6 @@ public:
 private:
 	greylock::database &m_db;
 	warp::language_checker &m_lch;
-	cache_control m_cc;
 
 	word_cache<std::string, std::string> m_word_cache;
 
@@ -292,11 +455,8 @@ private:
 	worker_stats m_wstats;
 
 	std::mutex m_lock;
-	std::deque<greylock::document> m_docs;
 
-	std::map<std::string, std::set<greylock::document_for_index>> m_token_indexes;
-	std::map<std::string, std::set<size_t>> m_token_shards;
-
+	index_cache m_index_cache;
 
 	ribosome::error_info feed_data(const char *data, size_t size, post *p) {
 		rapidjson::Document doc;
@@ -456,128 +616,42 @@ private:
 		doc.idx.attributes.emplace_back(fc);
 		doc.idx.attributes.emplace_back(urls);
 
+		ribosome::error_info err;
 		std::lock_guard<std::mutex> guard(m_lock);
-		m_docs.emplace_back(doc);
-		if (m_docs.size() > m_cc.doc_cache_size) {
-			write_documents();
+
+		err = m_index_cache.index(doc);
+		if (err) {
+			return err;
+		}
+
+		err = write_document(doc);
+		if (err) {
+			return err;
 		}
 
 		return ribosome::error_info();
 	}
 
-	ribosome::error_info write_documents() {
+	ribosome::error_info write_document(const greylock::document &doc) {
 		rocksdb::WriteBatch batch;
 
-		long empty_authors = 0;
-		for (auto &doc: m_docs) {
-			std::string doc_serialized = serialize(doc);
-			std::string dkey = m_db.options().document_prefix + doc.indexed_id.to_string();
-			batch.Put(rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
+		std::string doc_serialized = serialize(doc);
+		std::string dkey = m_db.options().document_prefix + doc.indexed_id.to_string();
+		batch.Put(rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
 
-			std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
-			std::string dids_key = m_db.options().document_id_prefix + doc.id;
-			batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
+		std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
+		std::string dids_key = m_db.options().document_id_prefix + doc.id;
+		batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
 
-			m_wstats.written_data_size += doc_serialized.size() + doc_indexed_id_serialized.size();
-
-			std::string mbox = doc.mbox;
-
-			auto err = write_document(doc);
-			if (err)
-				return err;
-
-			if (mbox == "post") {
-				if (doc.author.size()) {
-					doc.mbox = "journal." + doc.author + "." + mbox;
-					err = write_document(doc);
-					if (err)
-						return err;
-				} else {
-					empty_authors++;
-				}
-			} else {
-				size_t pos = doc.id.rfind('?');
-				pos = doc.id.rfind('/', pos);
-				if (pos != 0) {
-					std::string journal = doc.id.substr(0, pos);
-					doc.mbox = "journal." + journal + "." + mbox;
-					err = write_document(doc);
-					if (err)
-						return err;
-				}
-
-				if (doc.author.size()) {
-					doc.mbox = "author." + doc.author + "." + mbox;
-					err = write_document(doc);
-					if (err)
-						return err;
-				}
-			}
-		}
-
-		for (auto &p: m_token_indexes) {
-			greylock::disk_index di;
-			di.ids.insert(di.ids.end(), p.second.begin(), p.second.end());
-			std::string sdi = serialize(di);
-			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
-
-			m_wstats.written_data_size += sdi.size();
-		}
-
-		for (auto &p: m_token_shards) {
-			greylock::disk_token dt(p.second);
-			std::string sdt = serialize(dt);
-			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
-
-			m_wstats.written_data_size += sdt.size();
-		}
+		m_wstats.written_data_size += doc_serialized.size() + doc_indexed_id_serialized.size();
 
 		auto err = m_db.write(&batch);
 		if (err) {
 			return ribosome::create_error(err.code(), "could not write batch: %s", err.message().c_str());
 		}
 
-		m_wstats.documents += m_docs.size();
-		m_wstats.empty_authors += empty_authors;
-
-		m_docs.clear();
-		m_token_indexes.clear();
-		m_token_shards.clear();
-
 		return ribosome::error_info();
 	}
-
-	ribosome::error_info write_document(greylock::document &doc) {
-		doc.generate_token_keys(m_db.options());
-
-		greylock::document_for_index did;
-		did.indexed_id = doc.indexed_id;
-
-		for (const auto &attr: doc.idx.attributes) {
-			for (const auto &t: attr.tokens) {
-				auto it = m_token_indexes.find(t.key);
-				if (it == m_token_indexes.end()) {
-					std::set<greylock::document_for_index> tmp;
-					tmp.insert(did);
-					m_token_indexes[t.key] = std::move(tmp);
-				} else {
-					it->second.insert(did);
-				}
-
-				auto sh = m_token_shards.find(t.shard_key);
-				if (sh == m_token_shards.end()) {
-					std::set<size_t> tmp;
-					tmp.insert(t.shards.begin(), t.shards.end());
-					m_token_shards[t.shard_key] = std::move(tmp);
-				} else {
-					sh->second.insert(t.shards.begin(), t.shards.end());
-				}
-			}
-		}
-
-		return ribosome::error_info();
-	}
-
 };
 
 struct parse_stats {
@@ -658,16 +732,12 @@ public:
 		for (auto &t: m_pool) {
 			t.join();
 		}
+
+		merge_and_write_indexes();
 	}
 
 	void compact() {
 		m_db.compact();
-	}
-
-	void flush() {
-		for (auto &w: m_workers) {
-			w->flush();
-		}
 	}
 
 	ribosome::error_info open(const std::string &dbpath) {
@@ -700,6 +770,7 @@ public:
 
 	parse_stats pstats() const {
 		parse_stats ps;
+		ps.merge(m_icache_wstats);
 
 		for (auto &w: m_workers) {
 			auto &wstat = w->wstats();
@@ -707,6 +778,16 @@ public:
 		}
 
 		return ps;
+	}
+
+	ribosome::error_info merge_and_write_indexes() {
+		index_cache ic(m_db);
+
+		for (auto &w: m_workers) {
+			w->merge_index_cache(ic);
+		}
+
+		return ic.write_indexes(&m_icache_wstats);
 	}
 
 private:
@@ -721,7 +802,7 @@ private:
 	std::condition_variable m_pool_wait, m_parser_wait;
 	std::vector<std::thread> m_pool;
 
-	parse_stats m_ps;
+	worker_stats m_icache_wstats;
 
 	void callback(int idx) {
 		auto &worker = m_workers[idx];
@@ -773,8 +854,8 @@ int main(int argc, char *argv[])
 		("compact", "Compact database on exit")
 		("print-interval", bpo::value<long>(&print_interval)->default_value(100), "Statistics print interval in milliseconds")
 		("word-cache", bpo::value<size_t>(&cc.word_cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
-		("cached-documents", bpo::value<size_t>(&cc.doc_cache_size)->default_value(20000),
-			"Number of cached documents per thread prior merging its indexes and writing them into database")
+		("index-cache-interval", bpo::value<size_t>(&cc.index_cache_sync_interval)->default_value(60),
+			"Per-thread index cache flush interval in seconds")
 		("lang_stats", bpo::value<std::string>(&lang_path)->required(), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
 			"Language models, format: language:model_path")
@@ -839,7 +920,7 @@ int main(int argc, char *argv[])
 
 
 	namespace bio = boost::iostreams;
-	ribosome::timer tm, realtm, last_print;
+	ribosome::timer tm, realtm, last_print, last_index_cache_write;
 
 	std::ifstream file(input, std::ios::in | std::ios::binary);
 	bio::filtering_streambuf<bio::input> bin;
@@ -849,10 +930,9 @@ int main(int argc, char *argv[])
 	std::istream in(&bin);
 
 
+	size_t rewind_lines = rewind;
 	size_t total_size = 0;
-
 	size_t real_size = 0;
-	size_t real_num = 0;
 
 	parse_stats prev_ps;
 
@@ -866,8 +946,8 @@ int main(int argc, char *argv[])
 			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, lines: %ld, speed: %.2f MB/s %.2f [%.2f] lines/s, %s",
 			print_time(time(NULL), 0),
 			tm.elapsed() / 1000, total_size / (1024 * 1024.0),
-			ps.documents, ps.lines,
-			total_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
+			ps.documents + rewind_lines, ps.lines + rewind_lines,
+			real_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
 			ps.lines * 1000.0 / (float)realtm.elapsed(), dps.lines * 1000.0 / (float)last_print.elapsed(),
 			ps.print_stats().c_str());
 		prev_ps = ps;
@@ -894,15 +974,26 @@ int main(int argc, char *argv[])
 		}
 
 		real_size += line.size();
-		real_num++;
 
 		parser.queue_work(std::move(line));
+
+		if (last_index_cache_write.elapsed() > (long)cc.index_cache_sync_interval * 1000) {
+			auto err = parser.merge_and_write_indexes();
+			if (err) {
+				printf("\n%s\n", print_stats());
+				printf("could not merge and write indexes: %s\n", err.message().c_str());
+				exit(err.code());
+			}
+
+			last_index_cache_write.restart();
+		}
 
 		if (last_print.elapsed() > print_interval) {
 			printf("%s\n", print_stats());
 		}
+
 	}
-	parser.flush();
+	parser.merge_and_write_indexes();
 
 	printf("\n%s\n", print_stats());
 
