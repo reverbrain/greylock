@@ -90,10 +90,6 @@ public:
 			options::exact_match("/index"),
 			options::methods("POST", "PUT")
 		);
-		on<on_index>(
-			options::exact_match("/index_tokens"),
-			options::methods("POST", "PUT")
-		);
 
 		on<on_search>(
 			options::exact_match("/search"),
@@ -462,66 +458,9 @@ public:
 			return greylock::error_info();
 		}
 
-		greylock::error_info parse_doc_tokens(greylock::document &doc, const rapidjson::Value &idxs) {
-			for (rapidjson::Value::ConstMemberIterator it = idxs.MemberBegin(),
-					idxs_end = idxs.MemberEnd(); it != idxs_end; ++it) {
-				const char *aname = it->name.GetString();
-				const rapidjson::Value &avalue = it->value;
-
-				if (!avalue.IsString())
-					continue;
-
-				std::string aname_str(aname);
-
-				greylock::attribute orig(std::string("orig_") + aname_str);
-				greylock::attribute stemmed(std::string("fixed_") + aname_str);
-
-				const auto &tokens = greylock::get_array(avalue, "tokens");
-				if (!tokens.IsArray()) {
-					return greylock::create_error(-ENOENT,
-							"index: %s, invalid 'tokens' element, must be an array",
-							aname);
-				}
-
-				for (auto tok = tokens.Begin(), tok_end = tokens.End(); tok != tok_end; ++tok) {
-					if (!tok->IsObject()) {
-						return greylock::create_error(-EINVAL,
-								"index: %s, 'tokens' array must contain objects",
-								aname);
-					}
-
-					const char *word = greylock::get_string(*tok, "word");
-					if (!word) {
-						return greylock::create_error(-EINVAL,
-								"index: %s, there is no 'word' field in objects in 'tokens' array",
-								aname);
-					}
-					std::vector<greylock::pos_t> positions =
-						get_numeric_vector<greylock::pos_t>(*tok, "positions");
-
-					orig.insert(word, positions);
-
-					const char *stem = greylock::get_string(*tok, "stem");
-					if (stem) {
-						stemmed.insert(stem, positions);
-					}
-				}
-
-				doc.idx.attributes.emplace_back(orig);
-				doc.idx.attributes.emplace_back(stemmed);
-			}
-
-			return greylock::error_info();
-		}
-
 		greylock::error_info parse_docs(const std::string &mbox, const rapidjson::Value &docs) {
 			greylock::error_info err = greylock::create_error(-ENOENT,
 					"parse_docs: mbox: %s: could not parse document, there are no valid index entries", mbox.c_str());
-
-			bool want_tokens = false;
-			if (this->request().url().path().find("/index_tokens") == 0) {
-				want_tokens = true;
-			}
 
 			for (auto it = docs.Begin(), id_end = docs.End(); it != id_end; ++it) {
 				if (!it->IsObject()) {
@@ -572,13 +511,7 @@ public:
 					return greylock::create_error(-EINVAL, "docs/index must be array");
 				}
 
-				if (want_tokens) {
-					err = parse_doc_tokens(doc, idxs);
-					if (err)
-						return err;
-				} else {
-					doc.idx = server()->get_indexes(idxs);
-				}
+				doc.idx = server()->get_indexes(idxs);
 
 				err = process_one_document(doc);
 				if (err)
