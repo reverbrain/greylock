@@ -400,6 +400,11 @@ public:
 			std::string dkey = server()->options().document_prefix + doc.indexed_id.to_string();
 			batch.Put(rocksdb::Slice(dkey), doc_value);
 
+			std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
+			std::string dids_key = server()->options().document_id_prefix + doc.id;
+			batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
+
+
 			if (server()->options().sync_metadata_timeout == 0) {
 				auto err = server()->db().sync_metadata(&batch);
 				if (err) {
