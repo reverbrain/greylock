@@ -42,4 +42,3 @@ target_link_libraries(greylock_ljsearch
 	greylock
 	${WARP_LIBRARIES}
 )
-
