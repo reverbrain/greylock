@@ -534,6 +534,22 @@ private:
 			m_html.feed_text(content);
 			doc.ctx.links.insert(doc.ctx.links.end(), m_html.urls().begin(), m_html.urls().end());
 
+			auto get_stem = [&] (const std::string &word, const ribosome::lstring &idx) -> std::string {
+				std::string *stem_ptr = m_word_cache.get(word);
+				if (!stem_ptr) {
+					std::string lang = m_lch.language(word, idx);
+					std::string stem = m_stemmer.stem(word, lang, "");
+					m_word_cache.insert(word, stem);
+
+					stems.insert(stem);
+					return stem;
+				} else {
+					stems.insert(*stem_ptr);
+					return *stem_ptr;
+				}
+			};
+
+
 			for (auto &t: m_html.tokens()) {
 				ribosome::lstring lt = ribosome::lconvert::from_utf8(t);
 				auto lower_request = ribosome::lconvert::to_lower(lt);
@@ -556,25 +572,20 @@ private:
 					numbers_only = false;
 
 					if (idx.size() >= m_db.options().ngram_index_size) {
-						std::string *stem_ptr = m_word_cache.get(word);
-						if (!stem_ptr) {
-							std::string lang = m_lch.language(word, idx);
-							std::string stem = m_stemmer.stem(word, lang, "");
-							m_word_cache.insert(word, stem);
-
-							stems.emplace(stem);
-						} else {
-							stems.insert(*stem_ptr);
-						}
+						get_stem(word, idx);
 					} else {
 						if (pos > 0) {
 							auto &prev = all_words[pos - 1];
-							stems.emplace(ribosome::lconvert::to_string(prev + idx));
+							auto prev_word = ribosome::lconvert::to_string(prev);
+							auto st = get_stem(prev_word, prev);
+							stems.emplace(st + word);
 						}
 
 						if (pos < all_words.size() - 1) {
 							auto &next = all_words[pos + 1];
-							stems.emplace(ribosome::lconvert::to_string(idx + next));
+							auto next_word = ribosome::lconvert::to_string(next);
+							auto st = get_stem(next_word, next);
+							stems.emplace(word + st);
 						}
 					}
 				}
