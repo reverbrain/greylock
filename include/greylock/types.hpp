@@ -1,6 +1,7 @@
 #pragma once
 
 #include "greylock/database.hpp"
+#include "greylock/json.hpp"
 #include "greylock/id.hpp"
 
 #include <msgpack.hpp>
@@ -13,6 +14,8 @@
 #include <string>
 #include <sstream>
 #include <vector>
+
+#include <ribosome/split.hpp>
 
 namespace ioremap { namespace greylock {
 
@@ -74,8 +77,6 @@ struct indexes {
 	std::vector<attribute> attributes;
 	std::vector<attribute> exact;
 	std::vector<attribute> negation;
-
-	id_t range_start, range_end;
 
 	std::vector<attribute> merge(const std::vector<attribute> &our, const std::vector<attribute> &other) const {
 		std::map<std::string, attribute> attrs;
@@ -144,6 +145,48 @@ struct indexes {
 			"query: [" << dump_attributes(attributes) << "] ";
 		return ss.str();
 	}
+
+	static indexes get_indexes(const greylock::options &options, const rapidjson::Value &idxs) {
+		indexes ireq;
+
+		if (!idxs.IsObject())
+			return ireq;
+
+		ribosome::split spl;
+		for (rapidjson::Value::ConstMemberIterator it = idxs.MemberBegin(), idxs_end = idxs.MemberEnd(); it != idxs_end; ++it) {
+			const char *aname = it->name.GetString();
+			const rapidjson::Value &avalue = it->value;
+
+			if (!avalue.IsString())
+				continue;
+
+			greylock::attribute a(aname);
+
+			std::vector<ribosome::lstring> indexes =
+				spl.convert_split_words(avalue.GetString(), avalue.GetStringLength());
+			for (size_t pos = 0; pos < indexes.size(); ++pos) {
+				auto &idx = indexes[pos];
+				if (idx.size() >= options.ngram_index_size) {
+					a.insert(ribosome::lconvert::to_string(idx), pos);
+				} else {
+					if (pos > 0) {
+						auto &prev = indexes[pos - 1];
+						a.insert(ribosome::lconvert::to_string(prev + idx), pos);
+					}
+
+					if (pos < indexes.size() - 1) {
+						auto &next = indexes[pos + 1];
+						a.insert(ribosome::lconvert::to_string(idx + next), pos);
+					}
+				}
+			}
+
+			ireq.attributes.emplace_back(a);
+		}
+
+		return ireq;
+	}
+
 };
 
 struct content {

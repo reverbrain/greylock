@@ -28,15 +28,71 @@ struct search_result {
 // check whether given result matches query, may also set or change some result parameters like relevance field
 typedef std::function<bool (single_doc_result &)> check_result_function_t;
 
+struct mailbox_query {
+	std::string mbox;
+	greylock::indexes idx;
+
+	greylock::error_info parse_error;
+
+	mailbox_query(const greylock::options &options, const rapidjson::Value &doc) {
+		const rapidjson::Value &query_and = greylock::get_object(doc, "query");
+		if (query_and.IsObject()) {
+			auto ireq = indexes::get_indexes(options, query_and);
+			idx.merge_query(ireq);
+		}
+
+		const rapidjson::Value &query_exact = greylock::get_object(doc, "exact");
+		if (query_exact.IsObject()) {
+			auto ireq = indexes::get_indexes(options, query_exact);
+
+			// merge these indexes into intersection set,
+			// since exact phrase match implies document contains all tokens
+			idx.merge_exact(ireq);
+		}
+
+		const rapidjson::Value &query_negation = greylock::get_object(doc, "negation");
+		if (query_negation.IsObject()) {
+			auto ireq = indexes::get_indexes(options, query_negation);
+			// do not merge these indexes into intersection set, put them into own container
+			idx.merge_negation(ireq);
+		}
+
+		if (idx.attributes.empty()) {
+			parse_error = greylock::create_error(-ENOENT,
+					"search: mailbox: %s, there are no queries suitable for search", mbox.c_str());
+			return;
+		}
+	}
+};
+
+struct intersection_query {
+	id_t range_start, range_end;
+
+	std::vector<mailbox_query> se;
+
+	id_t next_document_id;
+	size_t max_number = LONG_MAX;
+
+	std::string to_string() const {
+		std::ostringstream ss;
+
+		ss << "[ ";
+		for (const auto &ent: se) {
+			ss << "mailbox: " << ent.mbox << ", indexes: " << ent.idx.to_string() << "| ";
+		}
+		ss << "]";
+
+		return ss.str();
+	}
+};
+
 template <typename DBT>
 class intersector {
 public:
 	intersector(DBT &db) : m_db(db) {}
 
-	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
-			id_t next_document_id, size_t max_num) const {
-		return intersect(mbox, indexes, next_document_id, max_num,
-				[&] (single_doc_result &) -> bool {
+	search_result intersect(const intersection_query &iq) const {
+		return intersect(iq, [&] (single_doc_result &) -> bool {
 					return true;
 				});
 	}
@@ -52,11 +108,9 @@ public:
 	// after call to this function returns, then intersection is completed.
 	//
 	// @search_result.completed will be set to true in this case.
-	search_result intersect(const std::string &mbox, const greylock::indexes &indexes,
-			id_t next_document_id, size_t max_num,
-			check_result_function_t check) const {
+	search_result intersect(const intersection_query &iq, check_result_function_t check) const {
 		search_result res;
-#if 0
+#ifdef STDOUT_DEBUG
 				auto dump_vector = [] (const std::vector<size_t> &sh) -> std::string {
 					std::ostringstream ss;
 					for (size_t i = 0; i < sh.size(); ++i) {
@@ -73,34 +127,36 @@ public:
 
 		std::vector<size_t> common_shards;
 		bool init = true;
-		for (const auto &attr: indexes.attributes) {
-			for (const auto &t: attr.tokens) {
-				std::string shard_key = document::generate_shard_key(m_db.options(), mbox, attr.name, t.name);
-				auto shards = m_db.get_shards(shard_key);
-#if 0
-				printf("common_shards: %s, key: %s, shards: %s\n",
-						dump_vector(common_shards).c_str(), shard_key.c_str(),
-						dump_vector(shards).c_str());
+		for (const auto &ent: iq.se) {
+			for (const auto &attr: ent.idx.attributes) {
+				for (const auto &t: attr.tokens) {
+					std::string shard_key = document::generate_shard_key(m_db.options(), ent.mbox, attr.name, t.name);
+					auto shards = m_db.get_shards(shard_key);
+#ifdef STDOUT_DEBUG
+					printf("common_shards: %s, key: %s, shards: %s\n",
+							dump_vector(common_shards).c_str(), shard_key.c_str(),
+							dump_vector(shards).c_str());
 #endif
-				// one index is empty, intersection will be empty, return early
-				if (shards.size() == 0) {
-					return res;
-				}
+					// one index is empty, intersection will be empty, return early
+					if (shards.size() == 0) {
+						return res;
+					}
 
-				if (init) {
-					common_shards = shards;
-					init = false;
-				} else {
-					std::vector<size_t> intersection;
-					std::set_intersection(common_shards.begin(), common_shards.end(),
-							shards.begin(), shards.end(),
-							std::back_inserter(intersection));
-					common_shards = intersection;
-				}
+					if (init) {
+						common_shards = shards;
+						init = false;
+					} else {
+						std::vector<size_t> intersection;
+						std::set_intersection(common_shards.begin(), common_shards.end(),
+								shards.begin(), shards.end(),
+								std::back_inserter(intersection));
+						common_shards = intersection;
+					}
 
-				// intersection is empty, return early
-				if (common_shards.size() == 0) {
-					return res;
+					// intersection is empty, return early
+					if (common_shards.size() == 0) {
+						return res;
+					}
 				}
 			}
 		}
@@ -120,29 +176,36 @@ public:
 		// iterator always points to the smallest document ID not yet pushed into resulting structure (or to client)
 		// or discarded (if other index iterators point to larger document IDs)
 		std::vector<iter> idata;
-
-		for (const auto &attr: indexes.attributes) {
-			for (const auto &t: attr.tokens) {
-				iter itr(m_db, mbox, attr.name, t.name, common_shards);
-
-				if (next_document_id != 0) {
-					itr.begin.rewind_to_index(next_document_id);
-				} else {
-					itr.begin.rewind_to_index(indexes.range_start);
-				}
-
-				idata.emplace_back(itr);
-			}
-		}
-
 		std::vector<iter> inegation;
-		for (const auto &attr: indexes.negation) {
-			for (const auto &t: attr.tokens) {
-				std::string shard_key = document::generate_shard_key(m_db.options(), mbox, attr.name, t.name);
-				auto shards = m_db.get_shards(shard_key);
 
-				iter itr(m_db, mbox, attr.name, t.name, shards);
-				inegation.emplace_back(itr);
+		for (const auto &ent: iq.se) {
+			for (const auto &attr: ent.idx.attributes) {
+				for (const auto &t: attr.tokens) {
+					iter itr(m_db, ent.mbox, attr.name, t.name, common_shards);
+
+					if (iq.next_document_id != 0) {
+						itr.begin.rewind_to_index(iq.next_document_id);
+					} else {
+						itr.begin.rewind_to_index(iq.range_start);
+					}
+
+					idata.emplace_back(itr);
+				}
+			}
+
+			for (const auto &attr: ent.idx.negation) {
+				for (const auto &t: attr.tokens) {
+					std::string shard_key = document::generate_shard_key(m_db.options(), ent.mbox, attr.name, t.name);
+					auto shards = m_db.get_shards(shard_key);
+#ifdef STDOUT_DEBUG
+					printf("negation: key: %s, shards: %s\n",
+							shard_key.c_str(),
+							dump_vector(shards).c_str());
+#endif
+
+					iter itr(m_db, ent.mbox, attr.name, t.name, shards);
+					inegation.emplace_back(itr);
+				}
 			}
 		}
 
@@ -236,7 +299,7 @@ public:
 					break;
 				}
 
-				if (it->indexed_id > indexes.range_end) {
+				if (it->indexed_id > iq.range_end) {
 					res.completed = true;
 					break;
 				}
@@ -335,7 +398,7 @@ public:
 			}
 
 			res.docs.emplace_back(rs);
-			if (res.docs.size() == max_num)
+			if (res.docs.size() == iq.max_number)
 				break;
 		}
 
