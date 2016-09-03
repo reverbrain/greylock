@@ -385,17 +385,18 @@ private:
 class lj_worker {
 public:
 	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc):
-		m_db(db), m_lch(lch), m_word_cache(cc.word_cache_size), m_index_cache(db)
+		m_db(db), m_lch(lch), m_word_cache(cc.word_cache_size),
+		m_index_write_interval(cc.index_cache_sync_interval * 1000), m_index_cache(db)
 	{
 	}
 
 	~lj_worker() {
+		write_index_cache();
 	}
 
-	void merge_index_cache(index_cache &dst) {
+	ribosome::error_info write_index_cache() {
 		std::lock_guard<std::mutex> guard(m_lock);
-		dst.insert(m_index_cache);
-		m_index_cache.clear();
+		return m_index_cache.write_indexes(&m_wstats);
 	}
 
 	ribosome::error_info process(const std::string &line) {
@@ -435,7 +436,14 @@ public:
 			}
 		}
 
-		return convert_to_document(std::move(p));
+		err = convert_to_document(std::move(p));
+
+		if (m_last_index_write.elapsed() > m_index_write_interval) {
+			write_index_cache();
+			m_last_index_write.restart();
+		}
+
+		return err;
 	}
 
 	const worker_stats &wstats() {
@@ -456,6 +464,8 @@ private:
 
 	std::mutex m_lock;
 
+	long m_index_write_interval = 10000;
+	ribosome::timer m_last_index_write;
 	index_cache m_index_cache;
 
 	ribosome::error_info feed_data(const char *data, size_t size, post *p) {
@@ -527,12 +537,13 @@ private:
 		ribosome::split spl;
 		bool numbers_only = true;
 
-		auto split_content = [&] (const std::string &content, greylock::attribute *a) -> std::vector<std::string> {
-			std::vector<std::string> ret;
+		auto split_content = [&] (const std::string &content, greylock::attribute *a) {
 			std::set<std::string> stems;
 
 			m_html.feed_text(content);
-			doc.ctx.links.insert(doc.ctx.links.end(), m_html.urls().begin(), m_html.urls().end());
+
+			doc.ctx.links.insert(doc.ctx.links.end(), m_html.links().begin(), m_html.links().end());
+			doc.ctx.images.insert(doc.ctx.images.end(), m_html.images().begin(), m_html.images().end());
 
 			auto get_stem = [&] (const std::string &word, const ribosome::lstring &idx) -> std::string {
 				std::string *stem_ptr = m_word_cache.get(word);
@@ -554,15 +565,10 @@ private:
 				ribosome::lstring lt = ribosome::lconvert::from_utf8(t);
 				auto lower_request = ribosome::lconvert::to_lower(lt);
 
-				size_t processed_text_size = 0;
-
 				auto all_words = spl.convert_split_words_allow_alphabet(lower_request, supported_alphabet);
 				for (size_t pos = 0; pos < all_words.size(); ++pos) {
 					auto &idx = all_words[pos];
 					std::string word = ribosome::lconvert::to_string(idx);
-					ret.push_back(word);
-
-					processed_text_size += word.size();
 
 					if (numbers_alphabet.ok(idx)) {
 						stems.emplace(word);
@@ -589,29 +595,29 @@ private:
 						}
 					}
 				}
-
-
-				m_wstats.processed_text_size += processed_text_size;
-				m_wstats.skipped_text_size += t.size() - processed_text_size;
 			}
 
-			for (auto &s: stems) {
-				a->tokens.emplace_back(s);
-			}
+			if (stems.size()) {
+				m_wstats.processed_text_size += content.size();
 
-			return ret;
+				for (auto &s: stems) {
+					a->tokens.emplace_back(s);
+				}
+			} else {
+				m_wstats.skipped_text_size += content.size();
+			}
 		};
 
 		greylock::attribute ft("fixed_title");
 		greylock::attribute fc("fixed_content");
 		greylock::attribute urls("urls");
 
-		doc.ctx.content = std::move(split_content(p.content, &fc));
-		doc.ctx.title = std::move(split_content(p.title, &ft));
+		split_content(p.content, &fc);
+		split_content(p.title, &ft);
 
 		m_wstats.lines++;
 
-		if ((doc.ctx.content.empty() && doc.ctx.title.empty()) || numbers_only) {
+		if ((ft.tokens.empty() && fc.tokens.empty()) || numbers_only) {
 			m_wstats.skipped_documents++;
 			return ribosome::error_info();
 		}
@@ -622,6 +628,9 @@ private:
 				urls.insert(ribosome::lconvert::to_string(u), 0);
 			}
 		}
+
+		doc.ctx.content = std::move(p.content);
+		doc.ctx.title = std::move(p.title);
 
 		doc.idx.attributes.emplace_back(ft);
 		doc.idx.attributes.emplace_back(fc);
@@ -744,7 +753,7 @@ public:
 			t.join();
 		}
 
-		merge_and_write_indexes();
+		write_indexes();
 	}
 
 	void compact() {
@@ -791,14 +800,16 @@ public:
 		return ps;
 	}
 
-	ribosome::error_info merge_and_write_indexes() {
-		index_cache ic(m_db);
+	ribosome::error_info write_indexes() {
+		ribosome::error_info err;
 
 		for (auto &w: m_workers) {
-			w->merge_index_cache(ic);
+			err = w->write_index_cache();
+			if (err)
+				return err;
 		}
 
-		return ic.write_indexes(&m_icache_wstats);
+		return err;
 	}
 
 private:
@@ -931,7 +942,7 @@ int main(int argc, char *argv[])
 
 
 	namespace bio = boost::iostreams;
-	ribosome::timer tm, realtm, last_print, last_index_cache_write;
+	ribosome::timer tm, realtm, last_print;
 
 	std::ifstream file(input, std::ios::in | std::ios::binary);
 	bio::filtering_streambuf<bio::input> bin;
@@ -988,23 +999,12 @@ int main(int argc, char *argv[])
 
 		parser.queue_work(std::move(line));
 
-		if (last_index_cache_write.elapsed() > (long)cc.index_cache_sync_interval * 1000) {
-			auto err = parser.merge_and_write_indexes();
-			if (err) {
-				printf("\n%s\n", print_stats());
-				printf("could not merge and write indexes: %s\n", err.message().c_str());
-				exit(err.code());
-			}
-
-			last_index_cache_write.restart();
-		}
-
 		if (last_print.elapsed() > print_interval) {
 			printf("%s\n", print_stats());
 		}
 
 	}
-	parser.merge_and_write_indexes();
+	parser.write_indexes();
 
 	printf("\n%s\n", print_stats());
 
