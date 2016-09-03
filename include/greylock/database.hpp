@@ -436,6 +436,7 @@ public:
 					rocksdb::kZlibCompression,
 					rocksdb::kZlibCompression,
 				});
+		dbo.compression_opts = rocksdb::CompressionOptions(-14, 9, 0, 0);
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
