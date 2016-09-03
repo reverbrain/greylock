@@ -191,8 +191,8 @@ struct indexes {
 };
 
 struct content {
-	std::vector<std::string> content;
-	std::vector<std::string> title;
+	std::string content;
+	std::string title;
 	std::vector<std::string> links;
 	std::vector<std::string> images;
 
@@ -211,7 +211,6 @@ struct document {
 	bool is_comment = false;
 
 	std::string author;
-	std::string data;
 	std::string id;
 
 	content ctx;

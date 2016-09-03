@@ -12,6 +12,7 @@
 #include <thevoid/server.hpp>
 #include <thevoid/stream.hpp>
 
+#include <ribosome/html.hpp>
 #include <ribosome/split.hpp>
 #include <ribosome/timer.hpp>
 
@@ -164,6 +165,26 @@ public:
 			return false;
 		}
 
+		std::vector<std::string> split_content(const std::string &content) {
+			std::vector<std::string> ret;
+
+			ribosome::html_parser html;
+			html.feed_text(content);
+
+			ribosome::split spl;
+			for (auto &t: html.tokens()) {
+				ribosome::lstring lt = ribosome::lconvert::from_utf8(t);
+				auto lower_request = ribosome::lconvert::to_lower(lt);
+
+				auto all_words = spl.convert_split_words(lower_request, ".:,");
+				for (auto &word: all_words) {
+					ret.emplace_back(ribosome::lconvert::to_string(word));
+				}
+			}
+
+			return ret;
+		}
+
 		// returns true if record has to be accepted, false - if record must be dropped
 		bool check_result(const greylock::intersection_query &iq, greylock::single_doc_result &sd) {
 			const greylock::document &doc = sd.doc;
@@ -173,9 +194,9 @@ public:
 					bool match;
 
 					if (attr.name.find("title") != std::string::npos) {
-						match = check_exact(attr.tokens, doc.ctx.title);
+						match = check_exact(attr.tokens, split_content(doc.ctx.title));
 					} else {
-						match = check_exact(attr.tokens, doc.ctx.content);
+						match = check_exact(attr.tokens, split_content(doc.ctx.content));
 					}
 
 					if (!match)
@@ -307,15 +328,17 @@ public:
 				rapidjson::Value indv(id_str.c_str(), id_str.size(), allocator);
 				key.AddMember("indexed_id", indv, allocator);
 
-				rapidjson::Value dv(doc.data.c_str(), doc.data.size(), allocator);
-				key.AddMember("data", dv, allocator);
-
 				rapidjson::Value av(doc.author.c_str(), doc.author.size(), allocator);
 				key.AddMember("author", av, allocator);
 
 				rapidjson::Value cv(rapidjson::kObjectType);
-				pack_string_array(cv, allocator, "content", doc.ctx.content);
-				pack_string_array(cv, allocator, "title", doc.ctx.title);
+
+				rapidjson::Value csv(doc.ctx.content.c_str(), doc.ctx.content.size(), allocator);
+				cv.AddMember("content", csv, allocator);
+
+				rapidjson::Value tsv(doc.ctx.title.c_str(), doc.ctx.title.size(), allocator);
+				cv.AddMember("title", tsv, allocator);
+
 				pack_string_array(cv, allocator, "links", doc.ctx.links);
 				pack_string_array(cv, allocator, "images", doc.ctx.images);
 				key.AddMember("content", cv, allocator);
@@ -435,8 +458,8 @@ public:
 			return ret;
 		}
 		greylock::error_info parse_content(const rapidjson::Value &ctx, greylock::document &doc) {
-			doc.ctx.content = get_string_vector(ctx, "content");
-			doc.ctx.title = get_string_vector(ctx, "title");
+			doc.ctx.content = greylock::get_string(ctx, "content", "");
+			doc.ctx.title = greylock::get_string(ctx, "title", "");
 			doc.ctx.links = get_string_vector(ctx, "links");
 			doc.ctx.images = get_string_vector(ctx, "images");
 
@@ -453,7 +476,6 @@ public:
 				}
 
 				const char *id = greylock::get_string(*it, "id");
-				const char *data = greylock::get_string(*it, "data");
 				const char *author = greylock::get_string(*it, "author");
 				if (!id) {
 					return greylock::create_error(-EINVAL, "id must be string");
@@ -477,9 +499,6 @@ public:
 				doc.mbox = mbox;
 				doc.assign_id(id, std::hash<std::string>{}(id), tsec, tnsec);
 
-				if (data) {
-					doc.data.assign(data);
-				}
 				if (author) {
 					doc.author.assign(author);
 				}
