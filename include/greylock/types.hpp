@@ -190,8 +190,8 @@ struct indexes {
 };
 
 struct content {
-	std::vector<std::string> content;
-	std::vector<std::string> title;
+	std::string content;
+	std::string title;
 	std::vector<std::string> links;
 	std::vector<std::string> images;
 
@@ -208,7 +208,6 @@ struct document {
 	std::string mbox;
 
 	std::string author;
-	std::string data;
 	std::string id;
 
 	content ctx;
@@ -219,7 +218,7 @@ struct document {
 	void msgpack_pack(msgpack::packer<Stream> &o) const {
 		o.pack_array(document::serialize_version_7);
 		o.pack((int)document::serialize_version_7);
-		o.pack(data);
+		o.pack(0); // unused
 		o.pack(author);
 		o.pack(ctx);
 		o.pack(id);
@@ -248,7 +247,7 @@ struct document {
 
 		switch (version) {
 		case document::serialize_version_7:
-			p[1].convert(&data);
+			//p[1].convert(&data); unused
 			p[2].convert(&author);
 			p[3].convert(&ctx);
 			p[4].convert(&id);

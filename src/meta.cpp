@@ -105,9 +105,8 @@ int main(int argc, char *argv[])
 
 			ss << "id: " << doc.id << ", author: " << doc.author;
 
-			ss << "\n             data: " << doc.data;
-			ss << "\n          content: " << dump_vector(doc.ctx.content);
-			ss << "\n            title: " << dump_vector(doc.ctx.title);
+			ss << "\n          content: " << doc.ctx.content;
+			ss << "\n            title: " << doc.ctx.title;
 			ss << "\n            links: " << dump_vector(doc.ctx.links);
 			ss << "\n           images: " << dump_vector(doc.ctx.images);
 
