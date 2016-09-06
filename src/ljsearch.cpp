@@ -52,8 +52,9 @@ static inline const char *print_time(long tsec, long tnsec)
 
 
 struct cache_control {
-	size_t word_cache_size = 1000000;
-	size_t index_cache_sync_interval = 60;
+	long word_cache_size = 1000000;
+	long index_cache_sync_interval = 60;
+	long index_cached_documents = 1000;
 };
 
 
@@ -220,7 +221,17 @@ struct worker_stats {
 
 class index_cache {
 public:
+	typedef std::list<greylock::document_for_index> index_container_t;
+	typedef std::list<size_t> shard_container_t;
+
+	typedef std::map<std::string, index_container_t> token_indexes_t;
+	typedef std::map<std::string, shard_container_t> token_shards_t;
+
 	index_cache(greylock::database &db) : m_db(db) {}
+
+	long cached_documents() const {
+		return m_documents;
+	}
 
 	ribosome::error_info index(greylock::document &doc) {
 		std::string mbox = doc.mbox;
@@ -283,8 +294,9 @@ public:
 		rocksdb::WriteBatch batch;
 
 		for (auto &p: m_token_indexes) {
+			std::set<greylock::document_for_index> u(p.second.begin(), p.second.end());
 			greylock::disk_index di;
-			di.ids.insert(di.ids.end(), p.second.begin(), p.second.end());
+			di.ids.insert(di.ids.end(), u.begin(), u.end());
 			std::string sdi = serialize(di);
 			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
 
@@ -292,7 +304,8 @@ public:
 		}
 
 		for (auto &p: m_token_shards) {
-			greylock::disk_token dt(p.second);
+			std::set<size_t> u(p.second.begin(), p.second.end());
+			greylock::disk_token dt(u);
 			std::string sdt = serialize(dt);
 			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
 
@@ -314,38 +327,38 @@ public:
 	void clear() {
 		m_token_indexes.clear();
 		m_token_shards.clear();
+
 		m_documents = 0;
 		m_empty_authors = 0;
 	}
 
-	void insert(const index_cache &other) {
-		for (auto &p: other.m_token_indexes) {
-			auto it = m_token_indexes.find(p.first);
-			if (it == m_token_indexes.end()) {
-				m_token_indexes[p.first] = p.second;
-			} else {
-				it->second.insert(p.second.begin(), p.second.end());
-			}
-		}
+	void swap(index_cache &other) {
+		std::swap(m_token_indexes, other.m_token_indexes);
+		std::swap(m_token_shards, other.m_token_shards);
 
-		for (auto &p: other.m_token_shards) {
-			auto it = m_token_shards.find(p.first);
-			if (it == m_token_shards.end()) {
-				m_token_shards[p.first] = p.second;
-			} else {
-				it->second.insert(p.second.begin(), p.second.end());
-			}
-		}
+		long tmp;
+		tmp = m_documents;
+		m_documents = other.m_documents;
+		other.m_documents = tmp;
 
-		m_documents += other.m_documents;
-		m_empty_authors += other.m_empty_authors;
+		tmp = m_empty_authors;
+		m_empty_authors = other.m_empty_authors;
+		other.m_empty_authors = tmp;
+	}
+
+	token_indexes_t &token_indexes() {
+		return m_token_indexes;
+	}
+
+	token_shards_t &token_shards() {
+		return m_token_shards;
 	}
 
 private:
 	greylock::database &m_db;
 
-	std::map<std::string, std::set<greylock::document_for_index>> m_token_indexes;
-	std::map<std::string, std::set<size_t>> m_token_shards;
+	token_indexes_t m_token_indexes;
+	token_shards_t m_token_shards;
 
 	long m_documents = 0;
 	long m_empty_authors = 0;
@@ -356,24 +369,23 @@ private:
 		greylock::document_for_index did;
 		did.indexed_id = doc.indexed_id;
 
-		for (const auto &attr: doc.idx.attributes) {
-			for (const auto &t: attr.tokens) {
+		for (auto &attr: doc.idx.attributes) {
+			for (auto &t: attr.tokens) {
 				auto it = m_token_indexes.find(t.key);
 				if (it == m_token_indexes.end()) {
-					std::set<greylock::document_for_index> tmp;
-					tmp.insert(did);
+					std::list<greylock::document_for_index> tmp;
+					tmp.push_back(did);
 					m_token_indexes[t.key] = std::move(tmp);
 				} else {
-					it->second.insert(did);
+					it->second.push_back(did);
 				}
 
 				auto sh = m_token_shards.find(t.shard_key);
 				if (sh == m_token_shards.end()) {
-					std::set<size_t> tmp;
-					tmp.insert(t.shards.begin(), t.shards.end());
+					std::list<size_t> tmp(t.shards.begin(), t.shards.end());
 					m_token_shards[t.shard_key] = std::move(tmp);
 				} else {
-					sh->second.insert(t.shards.begin(), t.shards.end());
+					sh->second.insert(sh->second.end(), t.shards.begin(), t.shards.end());
 				}
 			}
 		}
@@ -385,18 +397,28 @@ private:
 class lj_worker {
 public:
 	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc):
-		m_db(db), m_lch(lch), m_word_cache(cc.word_cache_size),
-		m_index_write_interval(cc.index_cache_sync_interval * 1000), m_index_cache(db)
+		m_db(db), m_lch(lch),
+		m_word_cache(cc.word_cache_size),
+		m_index_cache(db)
 	{
 	}
 
 	~lj_worker() {
-		write_index_cache();
 	}
 
-	ribosome::error_info write_index_cache() {
+	void swap(index_cache &dst) {
+		std::lock_guard<std::mutex> guard(m_lock);
+		m_index_cache.swap(dst);
+		m_index_cache.clear();
+	}
+
+	ribosome::error_info write_indexes() {
 		std::lock_guard<std::mutex> guard(m_lock);
 		return m_index_cache.write_indexes(&m_wstats);
+	}
+
+	long cached_documents() const {
+		return m_index_cache.cached_documents();
 	}
 
 	ribosome::error_info process(const std::string &line) {
@@ -436,19 +458,16 @@ public:
 			}
 		}
 
-		err = convert_to_document(std::move(p));
-
-		if (m_last_index_write.elapsed() > m_index_write_interval) {
-			write_index_cache();
-			m_last_index_write.restart();
-		}
-
-		return err;
+		return convert_to_document(std::move(p));
 	}
 
 	const worker_stats &wstats() {
 		m_wstats.cstats = m_word_cache.cstats();
 		return m_wstats;
+	}
+
+	void clear_index_cache() {
+		m_index_cache.clear();
 	}
 
 private:
@@ -464,7 +483,6 @@ private:
 
 	std::mutex m_lock;
 
-	long m_index_write_interval = 10000;
 	ribosome::timer m_last_index_write;
 	index_cache m_index_cache;
 
@@ -736,7 +754,7 @@ struct parse_stats {
 
 class lj_parser {
 public:
-	lj_parser(int n, const struct cache_control &cc) {
+	lj_parser(int n, const struct cache_control &cc) : m_cc(cc) {
 		m_pool.reserve(n);
 		m_workers.reserve(n);
 
@@ -744,6 +762,8 @@ public:
 			m_pool.emplace_back(std::bind(&lj_parser::callback, this, i));
 			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cc)));
 		}
+
+		m_sync_thread = std::thread(std::bind(&lj_parser::sync_callback, this));
 	}
 
 	~lj_parser() {
@@ -752,6 +772,9 @@ public:
 		for (auto &t: m_pool) {
 			t.join();
 		}
+
+		sync_wait();
+		m_sync_thread.join();
 
 		write_indexes();
 	}
@@ -800,31 +823,166 @@ public:
 		return ps;
 	}
 
-	ribosome::error_info write_indexes() {
+
+	template <typename T>
+	struct iter {
+		typename T::iterator it, end;
+
+		iter(T &i):
+			it(i.begin()),
+			end(i.end())
+		{
+		}
+	};
+
+	template <typename T, typename C>
+	void iterate(std::vector<iter<T>> &its, rocksdb::WriteBatch *batch, std::function<std::string (const C&)> sfunc) {
+		while (true) {
+			std::string name;
+
+			std::vector<size_t> positions;
+			for (size_t i = 0; i < its.size(); ++i) {
+				auto &it = its[i];
+				if (it.it == it.end) {
+					continue;
+				}
+
+				if (name.empty()) {
+					name = it.it->first;
+					positions.push_back(i);
+					continue;
+				}
+
+				if (it.it->first > name) {
+					continue;
+				}
+
+				if (it.it->first < name) {
+					positions.clear();
+					name = it.it->first;
+					positions.push_back(i);
+					continue;
+				}
+
+				positions.push_back(i);
+			}
+
+			if (positions.empty())
+				break;
+
+			C c;
+			for (auto pos: positions) {
+				auto &it = its[pos];
+				c.insert(it.it->second.begin(), it.it->second.end());
+				++it.it;
+			}
+
+			std::string sdata = sfunc(c);
+			batch->Merge(rocksdb::Slice(name), rocksdb::Slice(sdata));
+
+			m_icache_wstats.written_data_size += sdata.size();
+		}
+	}
+
+	greylock::error_info write_indexes() {
 		ribosome::error_info err;
 
+		std::list<std::unique_ptr<index_cache>> indexes;
+
 		for (auto &w: m_workers) {
-			err = w->write_index_cache();
-			if (err)
-				return err;
+			std::unique_ptr<index_cache> idx(new index_cache(m_db));
+			w->swap(*idx);
+			indexes.emplace_back(std::move(idx));
 		}
 
-		return err;
+		std::vector<iter<index_cache::token_indexes_t>> idx_iter;
+		std::vector<iter<index_cache::token_shards_t>> shard_iter;
+		for (auto &idx: indexes) {
+			idx_iter.emplace_back(idx->token_indexes());
+			shard_iter.emplace_back(idx->token_shards());
+		}
+
+		rocksdb::WriteBatch batch;
+		iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter, &batch,
+				[&] (const std::set<greylock::document_for_index> &c) {
+					greylock::disk_index di;
+					di.ids.insert(di.ids.end(), c.begin(), c.end());
+					return serialize(di);
+				});
+		idx_iter.clear();
+		idx_iter.shrink_to_fit();
+
+		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter, &batch,
+				[&] (const std::set<size_t> &c) {
+					greylock::disk_token dt(c);
+					return serialize(dt);
+				});
+		shard_iter.clear();
+		shard_iter.shrink_to_fit();
+
+		indexes.clear();
+
+		return m_db.write(&batch);
 	}
 
 private:
 	greylock::database m_db;
 	warp::language_checker m_lch;
+	cache_control m_cc;
 
 	std::vector<std::unique_ptr<lj_worker>> m_workers;
 
 	bool m_need_exit = false;
 	std::mutex m_lock;
-	std::deque<std::string> m_lines;
+	std::list<std::string> m_lines;
 	std::condition_variable m_pool_wait, m_parser_wait;
 	std::vector<std::thread> m_pool;
 
 	worker_stats m_icache_wstats;
+
+	std::mutex m_sync_lock;
+	std::condition_variable m_sync_wait;
+	std::thread m_sync_thread;
+	enum {
+		sync_not_started = 0,
+		sync_scheduled,
+		sync_in_progress,
+		sync_completed,
+		sync_exited,
+	} m_sync_state = sync_not_started;
+
+	void sync_wait() {
+		std::unique_lock<std::mutex> guard(m_sync_lock);
+		if (m_sync_state == sync_exited)
+			return;
+
+		m_sync_state = sync_scheduled;
+		m_sync_wait.notify_one();
+		m_sync_wait.wait(guard, [&] () { return m_sync_state == sync_completed || m_sync_state == sync_exited; });
+	}
+
+	void sync_callback() {
+		while (!m_need_exit) {
+			std::unique_lock<std::mutex> guard(m_sync_lock);
+			m_sync_wait.wait_for(guard, std::chrono::seconds(m_cc.index_cache_sync_interval));
+
+			if (m_sync_state != sync_scheduled)
+				continue;
+
+			m_sync_state = sync_in_progress;
+			guard.unlock();
+
+			write_indexes();
+
+			guard.lock();
+			m_sync_state = sync_completed;
+			m_sync_wait.notify_all();
+		}
+
+		std::unique_lock<std::mutex> guard(m_sync_lock);
+		m_sync_state = sync_exited;
+		m_sync_wait.notify_all();
+	}
 
 	void callback(int idx) {
 		auto &worker = m_workers[idx];
@@ -846,6 +1004,10 @@ private:
 					exit(err.code());
 				}
 
+				if (worker->cached_documents() > m_cc.index_cached_documents) {
+					sync_wait();
+				}
+
 				guard.lock();
 			}
 		}
@@ -865,19 +1027,21 @@ int main(int argc, char *argv[])
 	size_t rewind = 0;
 	int thread_num;
 	cache_control cc;
-	long print_interval = 100;
+	long print_interval;
 	generic.add_options()
 		("help", "This help message")
 		("input", bpo::value<std::string>(&input)->required(), "Livejournal dump file packed with bzip2")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
-		("threads", bpo::value<int>(&thread_num)->default_value(6), "Number of parser threads")
+		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of parser threads")
 		("alphabet", bpo::value<std::vector<std::string>>(&als)->composing(), "Allowed alphabet")
 		("compact", "Compact database on exit")
-		("print-interval", bpo::value<long>(&print_interval)->default_value(100), "Statistics print interval in milliseconds")
-		("word-cache", bpo::value<size_t>(&cc.word_cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
-		("index-cache-interval", bpo::value<size_t>(&cc.index_cache_sync_interval)->default_value(60),
+		("print-interval", bpo::value<long>(&print_interval)->default_value(1000), "Statistics print interval in milliseconds")
+		("word-cache", bpo::value<long>(&cc.word_cache_size)->default_value(100000), "Word->stem per thread cLRU cache size")
+		("index-cache-interval", bpo::value<long>(&cc.index_cache_sync_interval)->default_value(60),
 			"Per-thread index cache flush interval in seconds")
+		("index-cached-documents", bpo::value<long>(&cc.index_cached_documents)->default_value(1000),
+			"Maximum number of documents parsed and cached per thread")
 		("lang_stats", bpo::value<std::string>(&lang_path)->required(), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
 			"Language models, format: language:model_path")
