@@ -893,8 +893,6 @@ public:
 	}
 
 	greylock::error_info write_indexes() {
-		greylock::error_info err;
-
 		ribosome::timer total_tm, tmp_tm;
 		struct timespec start;
 		clock_gettime(CLOCK_REALTIME, &start);
@@ -917,6 +915,9 @@ public:
 		}
 		guard.unlock();
 
+		if (documents == 0)
+			return greylock::error_info();
+
 		long swap_time = tmp_tm.restart();
 
 		std::vector<iter<index_cache::token_indexes_t>> idx_iter;
@@ -926,14 +927,23 @@ public:
 			shard_iter.emplace_back(idx->token_shards());
 		}
 
-		long iter_create_time = tmp_tm.restart();
 		long indexes_num = 0;
 		long shards_num = 0;
 		long indexes_data_size = 0;
 		long shards_data_size = 0;
 
-		rocksdb::WriteBatch batch;
-		iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter, &batch,
+		long token_shards_iter_time = 0;
+		long token_indexes_iter_time = 0;
+
+		long indexes_write_time = 0;
+		long shards_write_time = 0;
+
+		rocksdb::WriteBatch index_batch, shards_batch;
+		greylock::error_info indexes_write_error, shards_write_error;
+
+		// time to create and join a thread is about 1ms on i7
+		std::thread index_thread([&] () {
+			iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter, &index_batch,
 				[&] (const std::set<greylock::document_for_index> &c) {
 					indexes_num += c.size();
 					greylock::disk_index di;
@@ -943,12 +953,15 @@ public:
 					return ret;
 				});
 
-		idx_iter.clear();
-		idx_iter.shrink_to_fit();
 
-		long token_indexes_iter_time = tmp_tm.restart();
+			idx_iter.clear();
+			idx_iter.shrink_to_fit();
+			token_indexes_iter_time = tmp_tm.elapsed();
 
-		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter, &batch,
+			indexes_write_error = m_db.write(&index_batch);
+		});
+
+		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter, &shards_batch,
 				[&] (const std::set<size_t> &c) {
 					shards_num += c.size();
 					greylock::disk_token dt(c);
@@ -956,43 +969,56 @@ public:
 					shards_data_size += ret.size();
 					return ret;
 				});
+
+
 		shard_iter.clear();
 		shard_iter.shrink_to_fit();
+		token_shards_iter_time = tmp_tm.elapsed();
 
-		long token_shards_iter_time = tmp_tm.restart();
+		shards_write_error = m_db.write(&shards_batch);
+		shards_write_time = tmp_tm.elapsed() - token_shards_iter_time;
+
+		index_thread.join();
+		indexes_write_time = tmp_tm.restart() - token_indexes_iter_time;
+
 
 		indexes.clear();
-
 		long indexes_clear_time = tmp_tm.restart();
 
 		if (indexes_num || shards_num) {
-			err = m_db.write(&batch);
-			if (!err) {
-				// protect against write_indexes() running in parallel from sync thread and called directly
-				guard.lock();
-				m_icache_wstats.documents += documents;
-				m_icache_wstats.empty_authors += empty_authors;
-				m_icache_wstats.written_data_size += indexes_data_size + shards_data_size;
-				guard.unlock();
+			if (indexes_write_error || shards_write_error) {
+				int code;
+				if (indexes_write_error) {
+					code = indexes_write_error.code();
+				} else {
+					code = shards_write_error.code();
+				}
+
+				return greylock::create_error(code, "could not write indexes: "
+						"indexes batch error: %s [%d], shards batch error: %s [%d]",
+						indexes_write_error.message().c_str(), indexes_write_error.code(),
+						shards_write_error.message().c_str(), shards_write_error.code());
 			}
-		}
 
-		long db_write_time = tmp_tm.restart();
+			// protect against write_indexes() running in parallel from sync thread and called directly
+			guard.lock();
+			m_icache_wstats.documents += documents;
+			m_icache_wstats.empty_authors += empty_authors;
+			m_icache_wstats.written_data_size += indexes_data_size + shards_data_size;
+			guard.unlock();
 
-		if (indexes_num || shards_num) {
-			printf("write_indexes: started: %s, workers: %ld, documents: %ld/%ld, "
-				"swap: %ld, iter_create: %ld, "
+			printf("write_indexes: started: %s, workers: %ld, documents: %ld/%ld, swap: %ld, "
 				"indexes: %ld, size: %ld, iteration: %ld, "
 				"shards: %ld, size: %ld, iteration: %ld, "
-				"indexes_clear: %ld, db_write: %ld, total_time: %ld\n",
-				print_time(start.tv_sec, start.tv_nsec), m_workers.size(), documents, m_icache_wstats.documents,
-				swap_time, iter_create_time,
+				"indexes_clear: %ld, db_write: indexes: %ld, shards: %ld, total_time: %ld\n",
+				print_time(start.tv_sec, start.tv_nsec),
+				m_workers.size(), documents, m_icache_wstats.documents, swap_time,
 				indexes_num, indexes_data_size, token_indexes_iter_time,
 				shards_num, shards_data_size, token_shards_iter_time,
-				indexes_clear_time, db_write_time, total_tm.elapsed());
+				indexes_clear_time, indexes_write_time, shards_write_time, total_tm.elapsed());
 		}
 
-		return err;
+		return greylock::error_info();
 	}
 
 	void sync_wait() {
@@ -1043,12 +1069,9 @@ private:
 
 			m_sync_state = sync_in_progress;
 
-			do {
-				guard.unlock();
-				write_indexes();
-				guard.lock();
-			// someone had scheduled sync, while we were writing indexes, run iteration again
-			} while (m_sync_state == sync_scheduled);
+			guard.unlock();
+			write_indexes();
+			guard.lock();
 
 			m_sync_state = sync_completed;
 			m_sync_wait.notify_all();
@@ -1079,7 +1102,7 @@ private:
 					exit(err.code());
 				}
 
-				if (worker->cached_documents() > m_cc.index_cached_documents) {
+				while (worker->cached_documents() > m_cc.index_cached_documents) {
 					sync_wait();
 				}
 
