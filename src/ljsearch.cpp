@@ -221,8 +221,8 @@ struct worker_stats {
 
 class index_cache {
 public:
-	typedef std::list<greylock::document_for_index> index_container_t;
-	typedef std::list<size_t> shard_container_t;
+	typedef std::vector<greylock::document_for_index> index_container_t;
+	typedef std::vector<size_t> shard_container_t;
 
 	typedef std::map<std::string, index_container_t> token_indexes_t;
 	typedef std::map<std::string, shard_container_t> token_shards_t;
@@ -376,8 +376,7 @@ private:
 			for (auto &t: attr.tokens) {
 				auto it = m_token_indexes.find(t.key);
 				if (it == m_token_indexes.end()) {
-					std::list<greylock::document_for_index> tmp;
-					tmp.push_back(did);
+					index_container_t tmp{did};
 					m_token_indexes[t.key] = std::move(tmp);
 				} else {
 					it->second.push_back(did);
@@ -385,7 +384,7 @@ private:
 
 				auto sh = m_token_shards.find(t.shard_key);
 				if (sh == m_token_shards.end()) {
-					std::list<size_t> tmp(t.shards.begin(), t.shards.end());
+					shard_container_t tmp(t.shards.begin(), t.shards.end());
 					m_token_shards[t.shard_key] = std::move(tmp);
 				} else {
 					sh->second.insert(sh->second.end(), t.shards.begin(), t.shards.end());
@@ -938,6 +937,9 @@ public:
 		long indexes_write_time = 0;
 		long shards_write_time = 0;
 
+		long indexes_sets = 0;
+		long shards_sets = 0;
+
 		rocksdb::WriteBatch index_batch, shards_batch;
 		greylock::error_info indexes_write_error, shards_write_error;
 
@@ -946,6 +948,7 @@ public:
 			iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter, &index_batch,
 				[&] (const std::set<greylock::document_for_index> &c) {
 					indexes_num += c.size();
+					indexes_sets += 1;
 					greylock::disk_index di;
 					di.ids.insert(di.ids.end(), c.begin(), c.end());
 					std::string ret = serialize(di);
@@ -964,6 +967,7 @@ public:
 		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter, &shards_batch,
 				[&] (const std::set<size_t> &c) {
 					shards_num += c.size();
+					shards_sets += 1;
 					greylock::disk_token dt(c);
 					std::string ret = serialize(dt);
 					shards_data_size += ret.size();
@@ -1008,13 +1012,14 @@ public:
 			guard.unlock();
 
 			printf("write_indexes: started: %s, workers: %ld, documents: %ld/%ld, swap: %ld, "
-				"indexes: %ld, size: %ld, iteration: %ld, "
-				"shards: %ld, size: %ld, iteration: %ld, "
+				"indexes: %ld, size: %ld, sets: %ld, mean per index: %.1f, iteration: %ld, "
+				"shards: %ld, size: %ld, sets: %ld, mean per shard: %.1f iteration: %ld, "
 				"indexes_clear: %ld, db_write: indexes: %ld, shards: %ld, total_time: %ld\n",
 				print_time(start.tv_sec, start.tv_nsec),
 				m_workers.size(), documents, m_icache_wstats.documents, swap_time,
-				indexes_num, indexes_data_size, token_indexes_iter_time,
-				shards_num, shards_data_size, token_shards_iter_time,
+				indexes_num, indexes_data_size, indexes_sets, (float)indexes_num / (float)indexes_sets,
+					token_indexes_iter_time,
+				shards_num, shards_data_size, indexes_sets, (float)shards_num / (float)shards_sets, token_shards_iter_time,
 				indexes_clear_time, indexes_write_time, shards_write_time, total_tm.elapsed());
 		}
 
