@@ -31,7 +31,7 @@
 namespace ioremap { namespace greylock {
 
 struct options {
-	size_t tokens_shard_size = 5000000;
+	size_t tokens_shard_size = 3600 * 24 * 365;
 
 	int max_threads = 8;
 
@@ -46,7 +46,7 @@ struct options {
 	// with the previous and next tokens.
 	// This options greatly speeds up requests with small words (like [to be or not to be]),
 	// but heavily increases index size.
-	unsigned int ngram_index_size = 3;
+	unsigned int ngram_index_size = 0;
 
 	std::string document_prefix;
 	std::string document_id_prefix;
@@ -425,18 +425,21 @@ public:
 		//dbo.disableDataSync = true;
 		dbo.IncreaseParallelism(m_opts.max_threads);
 
-		dbo.max_bytes_for_level_base = 1024 * 1024 * 1024;
+		dbo.max_bytes_for_level_base = 1024 * 1024 * 1024 * 50UL;
+		dbo.write_buffer_size = 1024 * 1024 * 1024UL;
+		dbo.max_write_buffer_number = 10;
+		dbo.min_write_buffer_number_to_merge = 4;
 
-		dbo.compression = rocksdb::kZlibCompression;
-		dbo.num_levels = 4;
+		dbo.compression = rocksdb::kZSTDNotFinalCompression;
+		dbo.num_levels = 5;
 		dbo.compression_per_level =
 			std::vector<rocksdb::CompressionType>({
-					rocksdb::kZlibCompression,
-					rocksdb::kZlibCompression,
-					rocksdb::kZlibCompression,
-					rocksdb::kZlibCompression,
+					rocksdb::kSnappyCompression,
+					rocksdb::kSnappyCompression,
+					rocksdb::kZSTDNotFinalCompression,
+					rocksdb::kZSTDNotFinalCompression,
 				});
-		dbo.compression_opts = rocksdb::CompressionOptions(-14, 9, 0, 0);
+		dbo.compression_opts = rocksdb::CompressionOptions(-14, 5, 0, 0);
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
@@ -533,6 +536,25 @@ public:
 		auto wo = rocksdb::WriteOptions();
 
 		auto s = m_db->Write(wo, batch);
+		if (!s.ok()) {
+			return greylock::create_error(-s.code(), "could not write batch: %s", s.ToString().c_str());
+		}
+
+		return greylock::error_info();
+	}
+
+	greylock::error_info write(const std::string &key, const std::string &value) {
+		if (!m_db) {
+			return greylock::create_error(-EINVAL, "database is not opened");
+		}
+
+		if (m_ro) {
+			return greylock::create_error(-EROFS, "read-only database");
+		}
+
+		auto wo = rocksdb::WriteOptions();
+
+		auto s = m_db->Merge(wo, rocksdb::Slice(key), rocksdb::Slice(value));
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not write batch: %s", s.ToString().c_str());
 		}
