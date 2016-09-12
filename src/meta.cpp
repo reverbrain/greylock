@@ -4,6 +4,7 @@
 #include "greylock/types.hpp"
 
 #include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 
 using namespace ioremap;
@@ -119,7 +120,16 @@ int main(int argc, char *argv[])
 			cmp.push_back(iname.substr(pos));
 
 			if (save_prefix.size()) {
-				save_prefix = save_prefix + "/" + iname + ":";
+				boost::system::error_code ec;
+				std::string dname = save_prefix + "/" + iname;
+				boost::filesystem::create_directories(dname, ec);
+				if (ec && ec != boost::system::errc::file_exists) {
+					fprintf(stderr, "could not create directory %s: %s [%d]\n",
+							dname.c_str(), ec.message().c_str(), ec.value());
+					return -ec.value();
+				}
+
+				save_prefix = dname;
 			}
 
 			const std::string &mbox = cmp[0];
@@ -131,7 +141,7 @@ int main(int argc, char *argv[])
 			std::vector<size_t> shards(db.get_shards(skey));
 
 			if (save_prefix.size()) {
-				std::ofstream sout(save_prefix + "shards.bin", std::ios::trunc);
+				std::ofstream sout(save_prefix + "/shards.bin", std::ios::trunc);
 				std::string sdata;
 				auto err = db.read(skey, &sdata);
 				if (err) {
@@ -157,7 +167,7 @@ int main(int argc, char *argv[])
 				}
 
 				if (save_prefix.size()) {
-					std::ofstream sout(save_prefix + "idx_shard." + std::to_string(shard_number), std::ios::trunc);
+					std::ofstream sout(save_prefix + "/idx_shard." + std::to_string(shard_number), std::ios::trunc);
 					sout.write(idata.data(), idata.size());
 				}
 
@@ -205,7 +215,7 @@ int main(int argc, char *argv[])
 				greylock::disk_index idx;
 				idx.ids.insert(idx.ids.begin(), sidx.begin(), sidx.end());
 
-				std::ofstream sout(save_prefix + "idx_merged.bin", std::ios::trunc);
+				std::ofstream sout(save_prefix + "/idx_merged.bin", std::ios::trunc);
 				std::string mdata = serialize(idx);
 				sout.write(mdata.data(), mdata.size());
 			}
