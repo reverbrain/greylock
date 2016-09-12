@@ -1,7 +1,7 @@
 #include <iostream>
 
 #include "greylock/database.hpp"
-#include "greylock/iterator.hpp"
+#include "greylock/types.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/program_options.hpp>
@@ -20,18 +20,6 @@ static inline const char *print_time(long tsec, long tnsec)
 
 	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) tnsec / 1000);
 	return __dnet_print_time;
-}
-
-template <typename T>
-std::string dump_vector(const std::vector<T> &vec) {
-	std::ostringstream ss;
-	for (size_t i = 0; i < vec.size(); ++i) {
-		ss << vec[i];
-		if (i != vec.size() - 1)
-			ss << " ";
-	}
-
-	return ss.str();
 }
 
 int main(int argc, char *argv[])
@@ -107,8 +95,8 @@ int main(int argc, char *argv[])
 
 			ss << "\n          content: " << doc.ctx.content;
 			ss << "\n            title: " << doc.ctx.title;
-			ss << "\n            links: " << dump_vector(doc.ctx.links);
-			ss << "\n           images: " << dump_vector(doc.ctx.images);
+			ss << "\n            links: " << greylock::dump_vector(doc.ctx.links);
+			ss << "\n           images: " << greylock::dump_vector(doc.ctx.images);
 
 			return ss.str();
 		};
@@ -128,23 +116,60 @@ int main(int argc, char *argv[])
 			}
 			cmp.push_back(iname.substr(pos));
 
-			for (auto it = greylock::index_iterator<greylock::database>::begin(db, cmp[0], cmp[1], cmp[2]),
-					end = greylock::index_iterator<greylock::database>::end(db, cmp[0], cmp[1], cmp[2]);
-					it != end;
-					++it) {
+			const std::string &mbox = cmp[0];
+			const std::string &attr = cmp[1];
+			const std::string &token = cmp[2];
 
-				std::cout << "indexed_id: " << print_index(it->indexed_id);
-				if (dump) {
-					greylock::document doc;
-					err = it.document(&doc);
-					if (err) {
-						std::cout << ", error: " << err.message();
-					} else {
-						std::cout << ", doc: " << print_doc(doc);
-					}
+			std::string index_base = greylock::document::generate_index_base(db.options(), mbox, attr, token);
+			std::vector<size_t> shards(db.get_shards(greylock::document::generate_shard_key(db.options(), mbox, attr, token)));
+
+			std::cout << "Number of shards: " << shards.size() << ", shards: " << greylock::dump_vector(shards) << std::endl;
+			for (auto shard_number: shards) {
+				std::string ikey = greylock::document::generate_index_key_shard_number(index_base, shard_number);
+				std::string idata;
+				auto err = db.read(ikey, &idata);
+				if (err) {
+					fprintf(stderr, "could not read index %s: %s [%d]\n",
+							ikey.c_str(), err.message().c_str(), err.code());
+					return err.code();
 				}
 
-				std::cout << std::endl;
+				greylock::disk_index idx;
+				err = greylock::deserialize(idx, idata.data(), idata.size());
+				if (err) {
+					fprintf(stderr, "could not deserialize index %s, size: %ld: %s [%d]\n",
+							ikey.c_str(), idata.size(), err.message().c_str(), err.code());
+					return err.code();
+				}
+
+				std::cout << "shard: " << shard_number << ", indexes: " << idx.ids.size() << std::endl;
+
+				for (auto &id: idx.ids) {
+					std::cout << "indexed_id: " << print_index(id.indexed_id);
+					if (dump) {
+						greylock::document doc;
+
+						std::string doc_data;
+						std::string dkey = db.options().document_prefix + id.indexed_id.to_string();
+						auto err = db.read(dkey, &doc_data);
+						if (err) {
+							fprintf(stderr, "could not read document %s: %s [%d]\n",
+									dkey.c_str(), err.message().c_str(), err.code());
+							return err.code();
+						}
+
+						err = greylock::deserialize(doc, doc_data.data(), doc_data.size());
+						if (err) {
+							fprintf(stderr, "could not deserialize document %s, size: %ld: %s [%d]\n",
+									dkey.c_str(), doc_data.size(), err.message().c_str(), err.code());
+							return err.code();
+						}
+
+						std::cout << ", doc: " << print_doc(doc);
+					}
+
+					std::cout << std::endl;
+				}
 			}
 		}
 
