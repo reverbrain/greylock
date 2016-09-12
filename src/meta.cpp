@@ -36,10 +36,12 @@ int main(int argc, char *argv[])
 	std::string iname;
 	bool dump = false;
 	std::string id_str;
+	std::string save_prefix;
 	bpo::options_description gr("Greylock index options");
 	gr.add_options()
 		("index", bpo::value<std::string>(&iname), "index name, format: mailbox.attribute.index")
 		("id", bpo::value<std::string>(&id_str), "read document with this indexed ID, format: ts.seq")
+		("save", bpo::value<std::string>(&save_prefix), "save index data into this directory")
 		("rocksdb", bpo::value<std::string>(&path)->required(),
 		 	"path to rocksdb, will be opened in read-only mode, safe to be called if different process is already using it")
 		("dump", "dump document data to stdout")
@@ -116,12 +118,32 @@ int main(int argc, char *argv[])
 			}
 			cmp.push_back(iname.substr(pos));
 
+			if (save_prefix.size()) {
+				save_prefix = save_prefix + "/" + iname + ":";
+			}
+
 			const std::string &mbox = cmp[0];
 			const std::string &attr = cmp[1];
 			const std::string &token = cmp[2];
 
 			std::string index_base = greylock::document::generate_index_base(db.options(), mbox, attr, token);
-			std::vector<size_t> shards(db.get_shards(greylock::document::generate_shard_key(db.options(), mbox, attr, token)));
+			std::string skey = greylock::document::generate_shard_key(db.options(), mbox, attr, token);
+			std::vector<size_t> shards(db.get_shards(skey));
+
+			if (save_prefix.size()) {
+				std::ofstream sout(save_prefix + "shards.bin", std::ios::trunc);
+				std::string sdata;
+				auto err = db.read(skey, &sdata);
+				if (err) {
+					fprintf(stderr, "could not read shards %s: %s [%d]\n",
+							skey.c_str(), err.message().c_str(), err.code());
+					return err.code();
+				}
+
+				sout.write(sdata.data(), sdata.size());
+			}
+
+			std::set<greylock::document_for_index> sidx;
 
 			std::cout << "Number of shards: " << shards.size() << ", shards: " << greylock::dump_vector(shards) << std::endl;
 			for (auto shard_number: shards) {
@@ -134,6 +156,12 @@ int main(int argc, char *argv[])
 					return err.code();
 				}
 
+				if (save_prefix.size()) {
+					std::ofstream sout(save_prefix + "idx_shard." + std::to_string(shard_number), std::ios::trunc);
+					sout.write(idata.data(), idata.size());
+				}
+
+
 				greylock::disk_index idx;
 				err = greylock::deserialize(idx, idata.data(), idata.size());
 				if (err) {
@@ -143,6 +171,7 @@ int main(int argc, char *argv[])
 				}
 
 				std::cout << "shard: " << shard_number << ", indexes: " << idx.ids.size() << std::endl;
+				sidx.insert(idx.ids.begin(), idx.ids.end());
 
 				for (auto &id: idx.ids) {
 					std::cout << "indexed_id: " << print_index(id.indexed_id);
@@ -171,6 +200,16 @@ int main(int argc, char *argv[])
 					std::cout << std::endl;
 				}
 			}
+
+			if (save_prefix.size()) {
+				greylock::disk_index idx;
+				idx.ids.insert(idx.ids.begin(), sidx.begin(), sidx.end());
+
+				std::ofstream sout(save_prefix + "idx_merged.bin", std::ios::trunc);
+				std::string mdata = serialize(idx);
+				sout.write(mdata.data(), mdata.size());
+			}
+
 		}
 
 		if (vm.count("id")) {
