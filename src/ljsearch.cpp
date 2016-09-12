@@ -217,6 +217,18 @@ struct worker_stats {
 	long written_data_size = 0;
 
 	struct word_cache_stats cstats;
+
+	worker_stats &operator+(const worker_stats &other) {
+		documents += other.documents;
+		lines += other.lines;
+		empty_authors += other.empty_authors;
+		skipped_documents += other.skipped_documents;
+		processed_text_size += other.documents;
+		processed_text_size += other.processed_text_size;
+		written_data_size += other.written_data_size;
+
+		return *this;
+	}
 };
 
 class index_cache {
@@ -292,36 +304,59 @@ public:
 		doc.mbox = mbox;
 		return ribosome::error_info();
 	}
-#if 0
+#if 1
 	ribosome::error_info write_indexes(worker_stats *wstats) {
-		rocksdb::WriteBatch batch;
+		rocksdb::WriteBatch indexes_batch, shards_batch;
+		long indexes_data_size = 0;
+		long shards_data_size = 0;
+
+		greylock::error_info indexes_write_error, shards_write_error;
+
+		// time to create and join a thread is about 1ms on i7
+		std::thread index_thread([&] () {
+			for (auto &p: m_token_shards) {
+				std::set<size_t> u(p.second.begin(), p.second.end());
+				greylock::disk_token dt(u);
+				std::string sdt = serialize(dt);
+				indexes_batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
+
+				indexes_data_size += sdt.size();
+			}
+
+			m_token_shards.clear();
+
+			indexes_write_error = m_db.write(&indexes_batch);
+		});
+
 
 		for (auto &p: m_token_indexes) {
 			std::set<greylock::document_for_index> u(p.second.begin(), p.second.end());
 			greylock::disk_index di;
 			di.ids.insert(di.ids.end(), u.begin(), u.end());
 			std::string sdi = serialize(di);
-			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
+			shards_batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
 
-			wstats->written_data_size += sdi.size();
+			shards_data_size += sdi.size();
 		}
 
-		for (auto &p: m_token_shards) {
-			std::set<size_t> u(p.second.begin(), p.second.end());
-			greylock::disk_token dt(u);
-			std::string sdt = serialize(dt);
-			batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
 
-			wstats->written_data_size += sdt.size();
+		shards_write_error = m_db.write(&shards_batch);
+
+		index_thread.join();
+
+		if (indexes_write_error) {
+			return ribosome::create_error(indexes_write_error.code(), "could not write indexes batch: %s",
+					indexes_write_error.message().c_str());
 		}
 
-		auto err = m_db.write(&batch);
-		if (err) {
-			return ribosome::create_error(err.code(), "could not write batch: %s", err.message().c_str());
+		if (shards_write_error) {
+			return ribosome::create_error(shards_write_error.code(), "could not write shards batch: %s",
+					shards_write_error.message().c_str());
 		}
 
 		wstats->documents += m_documents;
 		wstats->empty_authors += m_empty_authors;
+		wstats->written_data_size += indexes_data_size + shards_data_size;
 
 		clear();
 		return ribosome::error_info();
@@ -399,7 +434,7 @@ private:
 class lj_worker {
 public:
 	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc):
-		m_db(db), m_lch(lch),
+		m_db(db), m_lch(lch), m_cc(cc),
 		m_word_cache(cc.word_cache_size),
 		m_index_cache(db)
 	{
@@ -413,7 +448,7 @@ public:
 		m_index_cache.swap(dst);
 		m_index_cache.clear();
 	}
-#if 0
+#if 1
 	ribosome::error_info write_indexes() {
 		std::lock_guard<std::mutex> guard(m_lock);
 		return m_index_cache.write_indexes(&m_wstats);
@@ -460,7 +495,15 @@ public:
 			}
 		}
 
-		return convert_to_document(std::move(p));
+		err = convert_to_document(std::move(p));
+		if (err)
+			return err;
+
+		if (cached_documents() > m_cc.index_cached_documents) {
+			return write_indexes();
+		}
+
+		return err;
 	}
 
 	const worker_stats &wstats() {
@@ -475,6 +518,8 @@ public:
 private:
 	greylock::database &m_db;
 	warp::language_checker &m_lch;
+
+	cache_control m_cc;
 
 	word_cache<std::string, std::string> m_word_cache;
 
@@ -1105,10 +1150,6 @@ private:
 				if (err) {
 					std::cerr << "could not process line: " << err.message() << std::endl;
 					exit(err.code());
-				}
-
-				while (worker->cached_documents() > m_cc.index_cached_documents) {
-					sync_wait();
 				}
 
 				guard.lock();
