@@ -304,7 +304,7 @@ public:
 		doc.mbox = mbox;
 		return ribosome::error_info();
 	}
-#if 1
+#if 0
 	ribosome::error_info write_indexes(worker_stats *wstats) {
 		rocksdb::WriteBatch indexes_batch, shards_batch;
 		long indexes_data_size = 0;
@@ -448,7 +448,7 @@ public:
 		m_index_cache.swap(dst);
 		m_index_cache.clear();
 	}
-#if 1
+#if 0
 	ribosome::error_info write_indexes() {
 		std::lock_guard<std::mutex> guard(m_lock);
 		return m_index_cache.write_indexes(&m_wstats);
@@ -495,15 +495,7 @@ public:
 			}
 		}
 
-		err = convert_to_document(std::move(p));
-		if (err)
-			return err;
-
-		if (cached_documents() > m_cc.index_cached_documents) {
-			return write_indexes();
-		}
-
-		return err;
+		return convert_to_document(std::move(p));
 	}
 
 	const worker_stats &wstats() {
@@ -957,6 +949,9 @@ public:
 
 			indexes.emplace_back(std::move(idx));
 		}
+
+		m_sync_state = sync_swapped_caches;
+		m_sync_wait.notify_all();
 		guard.unlock();
 
 		if (documents == 0)
@@ -1078,7 +1073,7 @@ public:
 
 		m_sync_state = sync_scheduled;
 		m_sync_wait.notify_one();
-		m_sync_wait.wait(guard, [&] () { return m_sync_state == sync_completed || m_sync_state == sync_exited; });
+		m_sync_wait.wait(guard, [&] () { return m_sync_state != sync_scheduled; });
 	}
 
 
@@ -1103,7 +1098,7 @@ private:
 	enum {
 		sync_not_started = 0,
 		sync_scheduled,
-		sync_in_progress,
+		sync_swapped_caches,
 		sync_completed,
 		sync_exited,
 	} m_sync_state = sync_not_started;
@@ -1116,8 +1111,6 @@ private:
 
 			if ((m_sync_state != sync_scheduled) && (status == std::cv_status::no_timeout))
 				continue;
-
-			m_sync_state = sync_in_progress;
 
 			guard.unlock();
 			write_indexes();
@@ -1150,6 +1143,10 @@ private:
 				if (err) {
 					std::cerr << "could not process line: " << err.message() << std::endl;
 					exit(err.code());
+				}
+
+				if (worker->cached_documents() > m_cc.index_cached_documents) {
+					sync_wait();
 				}
 
 				guard.lock();
