@@ -694,7 +694,6 @@ private:
 		doc.idx.attributes.emplace_back(urls);
 
 		ribosome::error_info err;
-		std::lock_guard<std::mutex> guard(m_lock);
 
 		err = m_index_cache.index(doc);
 		if (err) {
