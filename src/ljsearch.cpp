@@ -693,19 +693,15 @@ private:
 		doc.idx.attributes.emplace_back(fc);
 		doc.idx.attributes.emplace_back(urls);
 
-		ribosome::error_info err;
-
-		err = m_index_cache.index(doc);
+		std::unique_lock<std::mutex> guard(m_lock);
+		auto err = m_index_cache.index(doc);
 		if (err) {
 			return err;
 		}
 
-		err = write_document(doc);
-		if (err) {
-			return err;
-		}
+		guard.unlock();
 
-		return ribosome::error_info();
+		return write_document(doc);
 	}
 
 	ribosome::error_info write_document(const greylock::document &doc) {
@@ -719,12 +715,13 @@ private:
 		std::string dids_key = m_db.options().document_id_prefix + doc.id;
 		batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
 
-		m_wstats.written_data_size += doc_serialized.size() + doc_indexed_id_serialized.size();
-
 		auto err = m_db.write(&batch);
 		if (err) {
 			return ribosome::create_error(err.code(), "could not write batch: %s", err.message().c_str());
 		}
+
+		std::unique_lock<std::mutex> guard(m_lock);
+		m_wstats.written_data_size += doc_serialized.size() + doc_indexed_id_serialized.size();
 
 		return ribosome::error_info();
 	}
