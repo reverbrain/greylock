@@ -6,6 +6,7 @@ set_target_properties(greylock PROPERTIES
 )
 target_link_libraries(greylock
 	${Boost_LIBRARIES}
+	${JEMALLOC_LIBRARIES}
 	${MSGPACK_LIBRARIES}
 	${RIBOSOME_LIBRARIES}
 	${ROCKSDB_LIBRARIES}
