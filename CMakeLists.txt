@@ -16,6 +16,7 @@ find_package(Ribosome REQUIRED)
 
 INCLUDE(cmake/locate_library.cmake)
 
+LOCATE_LIBRARY(JEMALLOC "jemalloc/jemalloc.h" "jemalloc")
 LOCATE_LIBRARY(MSGPACK "msgpack.hpp" "msgpack")
 LOCATE_LIBRARY(THEVOID "thevoid/server.hpp" "thevoid")
 LOCATE_LIBRARY(SWARM "swarm/http_request.hpp" "swarm")
