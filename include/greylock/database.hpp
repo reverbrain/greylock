@@ -31,7 +31,7 @@
 namespace ioremap { namespace greylock {
 
 struct options {
-	size_t tokens_shard_size = 3600 * 24 * 30;
+	size_t tokens_shard_size = 3600 * 24 * 15;
 
 	int max_threads = 8;
 
@@ -434,8 +434,9 @@ public:
 		dbo.num_levels = 5;
 		dbo.compression_per_level =
 			std::vector<rocksdb::CompressionType>({
-					rocksdb::kSnappyCompression,
-					rocksdb::kSnappyCompression,
+					rocksdb::kZSTDNotFinalCompression,
+					rocksdb::kZSTDNotFinalCompression,
+					rocksdb::kZSTDNotFinalCompression,
 					rocksdb::kZSTDNotFinalCompression,
 					rocksdb::kZSTDNotFinalCompression,
 				});
