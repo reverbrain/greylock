@@ -126,7 +126,7 @@ public:
 
 	error_info document(document *doc) {
 		std::string doc_data;
-		auto err = m_db.read(m_db.options().document_prefix + m_idx_current->indexed_id.to_string(), &doc_data);
+		auto err = m_db.read(greylock::options::documents_column, m_idx_current->indexed_id.to_string(), &doc_data);
 		if (err)
 			return err;
 
@@ -220,7 +220,7 @@ private:
 
 		std::string key = document::generate_index_key_shard_number(m_base, m_shards[m_shards_idx]);
 		std::string data;
-		auto err = m_db.read(key, &data);
+		auto err = m_db.read(greylock::options::indexes_column, key, &data);
 		if (err) {
 			set_shard_index(-1);
 			return;

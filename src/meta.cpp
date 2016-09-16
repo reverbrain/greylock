@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
 	bpo::options_description gr("Greylock index options");
 	gr.add_options()
 		("index", bpo::value<std::string>(&iname), "index name, format: mailbox.attribute.index")
-		("id", bpo::value<std::string>(&id_str), "read document with this indexed ID, format: ts.seq")
+		("id", bpo::value<std::string>(&id_str), "read document with this indexed ID, format: ts")
 		("save", bpo::value<std::string>(&save_prefix), "save index data into this directory")
 		("rocksdb", bpo::value<std::string>(&path)->required(),
 		 	"path to rocksdb, will be opened in read-only mode, safe to be called if different process is already using it")
@@ -80,14 +80,14 @@ int main(int argc, char *argv[])
 		}
 
 		auto print_index = [&](const greylock::id_t &id) -> std::string {
-			long tsec, tnsec;
-			id.get_timestamp(&tsec, &tnsec);
+			long tsec, aux;
+			id.get_timestamp(&tsec, &aux);
 
 			std::ostringstream ss;
 			ss << id.to_string() <<
 				", raw_ts: " << id.timestamp <<
-				", hash: " << id.seq <<
-				", ts: " << print_time(tsec, tnsec);
+				", aux: " << aux <<
+				", ts: " << print_time(tsec, 0);
 			return ss.str();
 		};
 
@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
 			if (save_prefix.size()) {
 				std::ofstream sout(save_prefix + "/shards.bin", std::ios::trunc);
 				std::string sdata;
-				auto err = db.read(skey, &sdata);
+				auto err = db.read(greylock::options::token_shards_column, skey, &sdata);
 				if (err) {
 					fprintf(stderr, "could not read shards %s: %s [%d]\n",
 							skey.c_str(), err.message().c_str(), err.code());
@@ -159,7 +159,7 @@ int main(int argc, char *argv[])
 			for (auto shard_number: shards) {
 				std::string ikey = greylock::document::generate_index_key_shard_number(index_base, shard_number);
 				std::string idata;
-				auto err = db.read(ikey, &idata);
+				auto err = db.read(greylock::options::indexes_column, ikey, &idata);
 				if (err) {
 					fprintf(stderr, "could not read index %s: %s [%d]\n",
 							ikey.c_str(), err.message().c_str(), err.code());
@@ -189,8 +189,8 @@ int main(int argc, char *argv[])
 						greylock::document doc;
 
 						std::string doc_data;
-						std::string dkey = db.options().document_prefix + id.indexed_id.to_string();
-						auto err = db.read(dkey, &doc_data);
+						std::string dkey = id.indexed_id.to_string();
+						auto err = db.read(greylock::options::documents_column, dkey, &doc_data);
 						if (err) {
 							fprintf(stderr, "could not read document %s: %s [%d]\n",
 									dkey.c_str(), err.message().c_str(), err.code());
@@ -232,7 +232,7 @@ int main(int argc, char *argv[])
 			greylock::id_t indexed_id(id_str.c_str());
 
 			std::string doc_data;
-			auto err = db.read(db.options().document_prefix + indexed_id.to_string(), &doc_data);
+			auto err = db.read(greylock::options::documents_column, indexed_id.to_string(), &doc_data);
 			if (err) {
 				std::cout << "could not read document with indexed_id: " << id_str <<
 					", error: " << err.message() << std::endl;

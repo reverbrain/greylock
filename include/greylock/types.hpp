@@ -207,6 +207,8 @@ struct document {
 
 	std::string mbox;
 
+	bool is_comment = false;
+
 	std::string author;
 	std::string id;
 
@@ -218,7 +220,7 @@ struct document {
 	void msgpack_pack(msgpack::packer<Stream> &o) const {
 		o.pack_array(document::serialize_version_7);
 		o.pack((int)document::serialize_version_7);
-		o.pack(0); // unused
+		o.pack(is_comment);
 		o.pack(author);
 		o.pack(ctx);
 		o.pack(id);
@@ -247,7 +249,7 @@ struct document {
 
 		switch (version) {
 		case document::serialize_version_7:
-			//p[1].convert(&data); unused
+			p[1].convert(&is_comment);
 			p[2].convert(&author);
 			p[3].convert(&ctx);
 			p[4].convert(&id);
@@ -265,7 +267,6 @@ struct document {
 	void assign_id(const char *cid, long seq, long tsec, long tnsec) {
 		id.assign(cid);
 		(void) tnsec;
-		//indexed_id.seq = seq;
 		indexed_id.set_timestamp(tsec, seq);
 	}
 
@@ -291,9 +292,9 @@ struct document {
 
 	static std::string generate_index_base(const options &options,
 			const std::string &mbox, const std::string &attr, const std::string &token) {
+		(void) options;
 		char ckey[mbox.size() + attr.size() + token.size() + 3 + 17];
-		size_t csize = snprintf(ckey, sizeof(ckey), "%s%s.%s.%s",
-				options.index_prefix.c_str(),
+		size_t csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s",
 				mbox.c_str(), attr.c_str(), token.c_str());
 
 		return std::string(ckey, csize);
@@ -318,9 +319,9 @@ struct document {
 
 	static std::string generate_shard_key(const options &options,
 			const std::string &mbox, const std::string &attr, const std::string &token) {
-		char ckey[options.token_shard_prefix.size() + mbox.size() + attr.size() + token.size() + 5];
-		size_t csize = snprintf(ckey, sizeof(ckey), "%s%s.%s.%s",
-				options.token_shard_prefix.c_str(),
+		(void) options;
+		char ckey[mbox.size() + attr.size() + token.size() + 5];
+		size_t csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s",
 				mbox.c_str(), attr.c_str(), token.c_str());
 
 		return std::string(ckey, csize);

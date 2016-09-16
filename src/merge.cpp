@@ -11,7 +11,7 @@ using namespace ioremap;
 
 class merger {
 public:
-	void merge(const std::string &output, const std::vector<std::string> &inputs) {
+	void merge(int column, const std::string &output, const std::vector<std::string> &inputs, bool compact) {
 		greylock::database odb;
 		auto err = odb.open_read_write(output);
 		if (err) {
@@ -31,11 +31,13 @@ public:
 						path.c_str(), err.message().c_str());
 			}
 
-			auto it = dbu->iterator(ro);
+			auto it = dbu->iterator(column, ro);
 			it->SeekToFirst();
 
 			if (!it->Valid()) {
-				ribosome::throw_error(-EINVAL, "iterator from database %s is not valid", path.c_str());
+				auto s = it->status();
+				ribosome::throw_error(-s.code(), "iterator from database %s is not valid: %s [%d]",
+						path.c_str(), s.ToString().c_str(), s.code());
 			}
 
 			its.emplace_back(it);
@@ -43,6 +45,10 @@ public:
 		}
 
 		auto cmp = rocksdb::BytewiseComparator();
+
+		long data_size = 0;
+		long written_keys = 0;
+		std::string first_key, last_key;
 
 		while (true) {
 			rocksdb::Slice key;
@@ -82,10 +88,12 @@ public:
 
 			rocksdb::WriteBatch batch;
 
+			long ds = 0;
 			for (auto pos: positions) {
 				auto &it = its[pos];
 
 				batch.Merge(key, it->value());
+				ds += it->value().size();
 			}
 
 			err = odb.write(&batch);
@@ -93,6 +101,14 @@ public:
 				ribosome::throw_error(err.code(), "key: %s, could not write batch of %ld elements: %s",
 						key.ToString().c_str(), positions.size(), err.message().c_str());
 			}
+
+			if (written_keys == 0) {
+				first_key = key.ToString();
+			}
+
+			written_keys++;
+			data_size += ds;
+			last_key = key.ToString();
 
 			for (auto pos: positions) {
 				auto &it = its[pos];
@@ -104,6 +120,9 @@ public:
 			}
 		}
 
+		printf("merge: column: %s [%d], written keys: %ld, written data size: %ld, first_key: %s, last_key: %s\n",
+				odb.options().column_names[column].c_str(), column, written_keys, data_size, first_key.c_str(), last_key.c_str());
+
 		long max_seq = 0;
 		for (auto &db: dbs) {
 			auto &m = db->metadata();
@@ -114,6 +133,11 @@ public:
 		}
 
 		odb.metadata().set_sequence(max_seq);
+
+		if (compact) {
+			odb.compact();
+			odb.compact();
+		}
 	}
 private:
 };
@@ -127,8 +151,11 @@ int main(int argc, char *argv[])
 	std::string output;
 	std::vector<std::string> inputs;
 	int thread_num;
+	std::string column;
 	generic.add_options()
 		("help", "This help message")
+		("column", bpo::value<std::string>(&column)->required(), "Column name to merge")
+		("compact", "Whether to compact output database or not")
 		("input", bpo::value<std::vector<std::string>>(&inputs)->required()->composing(), "Input rocksdb database")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of merge threads")
@@ -153,9 +180,18 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	greylock::options opt;
+	auto it = std::find(opt.column_names.begin(), opt.column_names.end(), column);
+	if (it == opt.column_names.end()) {
+		std::cerr << "Invalig column " << column << ", supported columns: " << greylock::dump_vector(opt.column_names) << std::endl;
+		return -EINVAL;
+	}
+
+	auto column_id = std::distance(opt.column_names.begin(), it);
+
 	try {
 		merger m;
-		m.merge(output, inputs);
+		m.merge(column_id, output, inputs, vm.count("compact") != 0);
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
 		return -1;
