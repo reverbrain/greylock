@@ -124,9 +124,9 @@ public:
 		return &(*m_idx_current);
 	}
 
-	error_info document(document *doc) {
+	error_info document(DBT &db, document *doc) {
 		std::string doc_data;
-		auto err = m_db.read(greylock::options::documents_column, m_idx_current->indexed_id.to_string(), &doc_data);
+		auto err = db.read(greylock::options::documents_column, m_idx_current->indexed_id.to_string(), &doc_data);
 		if (err)
 			return err;
 
