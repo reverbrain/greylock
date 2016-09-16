@@ -243,12 +243,6 @@ int main(int argc, char *argv[])
 		}
 
 		if (vm.count("id")) {
-			auto pos = id_str.find('.');
-			if (pos == 0 || pos == std::string::npos) {
-				std::cerr << "invalid ID string: " << id_str << std::endl;
-				return -1;
-			}
-
 			greylock::id_t indexed_id(id_str.c_str());
 
 			std::string doc_data;
