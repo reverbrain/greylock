@@ -33,7 +33,7 @@ int main(int argc, char *argv[])
 		;
 
 
-	std::string path;
+	std::string dpath, ipath;
 	std::string iname;
 	bool dump = false;
 	std::string id_str;
@@ -43,8 +43,12 @@ int main(int argc, char *argv[])
 		("index", bpo::value<std::string>(&iname), "index name, format: mailbox.attribute.index")
 		("id", bpo::value<std::string>(&id_str), "read document with this indexed ID, format: ts")
 		("save", bpo::value<std::string>(&save_prefix), "save index data into this directory")
-		("rocksdb", bpo::value<std::string>(&path)->required(),
-		 	"path to rocksdb, will be opened in read-only mode, safe to be called if different process is already using it")
+		("rocksdb.docs", bpo::value<std::string>(&dpath),
+		 	"path to rocksdb containing documents, "
+			"will be opened in read-only mode, safe to be called if different process is already using it")
+		("rocksdb.indexes", bpo::value<std::string>(&ipath)->required(),
+		 	"path to rocksdb containing indexes, "
+			"will be opened in read-only mode, safe to be called if different process is already using it")
 		("dump", "dump document data to stdout")
 		;
 
@@ -71,12 +75,28 @@ int main(int argc, char *argv[])
 		dump = true;
 	}
 
+	if (dump || vm.count("id")) {
+		if (dpath.empty()) {
+			std::cerr << "You must provide documents database when using dump or id option\n" << cmdline_options << std::endl;
+			return -1;
+		}
+	}
+
 	try {
 		greylock::database db;
-		auto err = db.open_read_only(path);
+		auto err = db.open_read_only(ipath);
 		if (err) {
 			std::cerr << "could not open database: " << err.message();
 			return err.code();
+		}
+
+		greylock::database db_docs;
+		if (dpath.size()) {
+			auto err = db_docs.open_read_only(dpath);
+			if (err) {
+				std::cerr << "could not open database: " << err.message();
+				return err.code();
+			}
 		}
 
 		auto print_index = [&](const greylock::id_t &id) -> std::string {
@@ -190,7 +210,7 @@ int main(int argc, char *argv[])
 
 						std::string doc_data;
 						std::string dkey = id.indexed_id.to_string();
-						auto err = db.read(greylock::options::documents_column, dkey, &doc_data);
+						auto err = db_docs.read(greylock::options::documents_column, dkey, &doc_data);
 						if (err) {
 							fprintf(stderr, "could not read document %s: %s [%d]\n",
 									dkey.c_str(), err.message().c_str(), err.code());
@@ -232,7 +252,7 @@ int main(int argc, char *argv[])
 			greylock::id_t indexed_id(id_str.c_str());
 
 			std::string doc_data;
-			auto err = db.read(greylock::options::documents_column, indexed_id.to_string(), &doc_data);
+			auto err = db_docs.read(greylock::options::documents_column, indexed_id.to_string(), &doc_data);
 			if (err) {
 				std::cout << "could not read document with indexed_id: " << id_str <<
 					", error: " << err.message() << std::endl;

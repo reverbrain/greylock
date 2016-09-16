@@ -99,13 +99,6 @@ public:
 		return true;
 	}
 
-	const greylock::options &options() const {
-		return m_db.options();
-	}
-	greylock::metadata &metadata() {
-		return m_db.metadata();
-	}
-
 	struct on_ping : public simple_request_stream_error<http_server> {
 		virtual void on_request(const thevoid::http_request &req, const boost::asio::const_buffer &buffer) {
 			(void) buffer;
@@ -120,7 +113,8 @@ public:
 			(void) req;
 			(void) buffer;
 
-			server()->db().compact();
+			server()->db_docs().compact();
+			server()->db_indexes().compact();
 			this->send_reply(thevoid::http_response::ok);
 		}
 	};
@@ -269,7 +263,7 @@ public:
 					return;
 				}
 
-				greylock::mailbox_query q(server()->options(), it->value);
+				greylock::mailbox_query q(server()->db_indexes().options(), it->value);
 				if (q.parse_error) {
 					send_error(swarm::http_response::bad_request, q.parse_error.code(),
 							"search: could not parse mailbox query: %s",
@@ -283,7 +277,7 @@ public:
 			}
 
 			greylock::search_result result;
-			greylock::intersector<greylock::database> inter(server()->db());
+			greylock::intersector<greylock::database> inter(server()->db_docs(), server()->db_indexes());
 			result = inter.intersect(iq, std::bind(&on_search::check_result, this, std::ref(iq), std::placeholders::_1));
 
 			send_search_result(result);
@@ -381,9 +375,9 @@ public:
 
 	struct on_index : public simple_request_stream_error<http_server> {
 		greylock::error_info process_one_document(greylock::document &doc) {
-			doc.generate_token_keys(server()->options());
+			doc.generate_token_keys(server()->db_indexes().options());
 
-			rocksdb::WriteBatch batch;
+			rocksdb::WriteBatch docs_batch, indexes_batch;
 
 			std::string doc_serialized = serialize(doc);
 			rocksdb::Slice doc_value(doc_serialized);
@@ -395,12 +389,12 @@ public:
 			size_t indexes = 0;
 			for (const auto &attr: doc.idx.attributes) {
 				for (const auto &t: attr.tokens) {
-					batch.Merge(rocksdb::Slice(t.key), rocksdb::Slice(sdid));
+					indexes_batch.Merge(rocksdb::Slice(t.key), rocksdb::Slice(sdid));
 
 					greylock::disk_token dt(t.shards);
 					std::string dts = serialize(dt);
 
-					batch.Merge(rocksdb::Slice(t.shard_key), rocksdb::Slice(dts));
+					indexes_batch.Merge(rocksdb::Slice(t.shard_key), rocksdb::Slice(dts));
 
 					indexes++;
 				}
@@ -408,23 +402,22 @@ public:
 
 			// we must have a copy, since otherwise batch will cache stall pointer to rvalue
 			std::string dkey = doc.indexed_id.to_string();
-			batch.Put(server()->db().cfhandle(greylock::options::documents_column), rocksdb::Slice(dkey), doc_value);
+			docs_batch.Put(server()->db_docs().cfhandle(greylock::options::documents_column), rocksdb::Slice(dkey), doc_value);
 
 			std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
-			batch.Put(server()->db().cfhandle(greylock::options::document_ids_column),
+			docs_batch.Put(server()->db_docs().cfhandle(greylock::options::document_ids_column),
 					rocksdb::Slice(doc.id), rocksdb::Slice(doc_indexed_id_serialized));
 
 
-			if (server()->options().sync_metadata_timeout == 0) {
-				auto err = server()->db().sync_metadata(&batch);
-				if (err) {
-					return err;
-				}
+			auto err = server()->db_docs().write(&docs_batch);
+			if (err) {
+				return greylock::create_error(err.code(), "could not write docs batch, mbox: %s, id: %s, error: %s",
+					doc.mbox.c_str(), doc.id.c_str(), err.message().c_str());
 			}
 
-			auto err = server()->db().write(&batch);
+			err = server()->db_indexes().write(&indexes_batch);
 			if (err) {
-				return greylock::create_error(err.code(), "could not write index batch, mbox: %s, id: %s, error: %s",
+				return greylock::create_error(err.code(), "could not write indexes batch, mbox: %s, id: %s, error: %s",
 					doc.mbox.c_str(), doc.id.c_str(), err.message().c_str());
 			}
 
@@ -504,7 +497,7 @@ public:
 
 				greylock::document doc;
 				doc.mbox = mbox;
-				doc.assign_id(id, server()->metadata().get_sequence(), tsec, tnsec);
+				doc.assign_id(id, std::hash<std::string>{}(id), tsec, tnsec);
 
 				if (author) {
 					doc.author.assign(author);
@@ -522,7 +515,7 @@ public:
 					return greylock::create_error(-EINVAL, "docs/index must be array");
 				}
 
-				doc.idx = greylock::indexes::get_indexes(server()->options(), idxs);
+				doc.idx = greylock::indexes::get_indexes(server()->db_indexes().options(), idxs);
 
 				err = process_one_document(doc);
 				if (err)
@@ -583,28 +576,47 @@ public:
 		}
 	};
 
-	greylock::database &db() {
-		return m_db;
+	greylock::database &db_docs() {
+		return m_db_docs;
+	}
+	greylock::database &db_indexes() {
+		return m_db_indexes;
 	}
 
 private:
-	greylock::database m_db;
+	greylock::database m_db_docs, m_db_indexes;
 
 	bool rocksdb_init(const rapidjson::Value &config) {
-		const auto &rconf = greylock::get_object(config, "rocksdb");
-		if (!rconf.IsObject()) {
-			ILOG_ERROR("there is no 'rocksdb' object in config");
+		const auto &rdbconf = greylock::get_object(config, "rocksdb.docs");
+		if (!rdbconf.IsObject()) {
+			ILOG_ERROR("there is no 'rocksdb.docs' object in config");
 			return false;
 		}
 
-		const char *path = greylock::get_string(rconf, "path");
+		const auto &riconf = greylock::get_object(config, "rocksdb.indexes");
+		if (!riconf.IsObject()) {
+			ILOG_ERROR("there is no 'rocksdb.indexes' object in config");
+			return false;
+		}
+
+		if (!rocksdb_config_parse(rdbconf, &m_db_docs))
+			return false;
+
+		if (!rocksdb_config_parse(riconf, &m_db_indexes))
+			return false;
+
+		return true;
+	}
+
+	bool rocksdb_config_parse(const rapidjson::Value &config, greylock::database *db) {
+		const char *path = greylock::get_string(config, "path");
 		if (!path) {
 			ILOG_ERROR("there is no 'path' string in rocksdb config");
 			return false;
 		}
-		bool ro = greylock::get_bool(rconf, "read_only", false);
+		bool ro = greylock::get_bool(config, "read_only", false);
 
-		auto err = m_db.open(path, ro);
+		auto err = db->open(path, ro);
 		if (err) {
 			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;

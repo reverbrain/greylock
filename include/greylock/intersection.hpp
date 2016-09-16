@@ -89,7 +89,7 @@ struct intersection_query {
 template <typename DBT>
 class intersector {
 public:
-	intersector(DBT &db) : m_db(db) {}
+	intersector(DBT &db_docs, DBT &db_indexes) : m_db_docs(db_docs), m_db_indexes(db_indexes) {}
 
 	search_result intersect(const intersection_query &iq) const {
 		return intersect(iq, [&] (single_doc_result &) -> bool {
@@ -130,8 +130,8 @@ public:
 		for (const auto &ent: iq.se) {
 			for (const auto &attr: ent.idx.attributes) {
 				for (const auto &t: attr.tokens) {
-					std::string shard_key = document::generate_shard_key(m_db.options(), ent.mbox, attr.name, t.name);
-					auto shards = m_db.get_shards(shard_key);
+					std::string shard_key = document::generate_shard_key(m_db_indexes.options(), ent.mbox, attr.name, t.name);
+					auto shards = m_db_indexes.get_shards(shard_key);
 #ifdef STDOUT_DEBUG
 					printf("common_shards: %s, key: %s, shards: %s\n",
 							dump_vector(common_shards).c_str(), shard_key.c_str(),
@@ -181,7 +181,7 @@ public:
 		for (const auto &ent: iq.se) {
 			for (const auto &attr: ent.idx.attributes) {
 				for (const auto &t: attr.tokens) {
-					iter itr(m_db, ent.mbox, attr.name, t.name, common_shards);
+					iter itr(m_db_indexes, ent.mbox, attr.name, t.name, common_shards);
 
 					if (iq.next_document_id != 0) {
 						itr.begin.rewind_to_index(iq.next_document_id);
@@ -195,15 +195,15 @@ public:
 
 			for (const auto &attr: ent.idx.negation) {
 				for (const auto &t: attr.tokens) {
-					std::string shard_key = document::generate_shard_key(m_db.options(), ent.mbox, attr.name, t.name);
-					auto shards = m_db.get_shards(shard_key);
+					std::string shard_key = document::generate_shard_key(m_db_indexes.options(), ent.mbox, attr.name, t.name);
+					auto shards = m_db_indexes.get_shards(shard_key);
 #ifdef STDOUT_DEBUG
 					printf("negation: key: %s, shards: %s\n",
 							shard_key.c_str(),
 							dump_vector(shards).c_str());
 #endif
 
-					iter itr(m_db, ent.mbox, attr.name, t.name, shards);
+					iter itr(m_db_indexes, ent.mbox, attr.name, t.name, shards);
 					inegation.emplace_back(itr);
 				}
 			}
@@ -379,7 +379,7 @@ public:
 			}
 
 			single_doc_result rs;
-			auto err = min_it.document(&rs.doc);
+			auto err = min_it.document(m_db_docs, &rs.doc);
 			if (err) {
 #if 0
 				printf("could not read document id: %ld, err: %s [%d]\n",
@@ -405,7 +405,8 @@ public:
 		return res;
 	}
 private:
-	DBT &m_db;
+	DBT &m_db_docs;
+	DBT &m_db_indexes;
 };
 
 }} // namespace ioremap::greylock
