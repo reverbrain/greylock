@@ -48,19 +48,27 @@ struct options {
 	// but heavily increases index size.
 	unsigned int ngram_index_size = 0;
 
-	std::string document_prefix;
-	std::string document_id_prefix;
-	std::string token_shard_prefix;
-	std::string index_prefix;
+	enum {
+		default_column = 0,
+		documents_column,
+		document_ids_column,
+		token_shards_column,
+		indexes_column,
+		meta_column,
+		__column_size,
+	};
+
+	std::vector<std::string> column_names;
 	std::string metadata_key;
 
-	options():
-		document_prefix("documents."),
-		document_id_prefix("document_ids."),
-		token_shard_prefix("token_shards."),
-		index_prefix("index."),
-		metadata_key("greylock.meta.key")
-	{
+	options(): metadata_key("greylock.meta.key") {
+		column_names.resize(__column_size);
+		column_names[default_column] = rocksdb::kDefaultColumnFamilyName;
+		column_names[documents_column] = "documents";
+		column_names[document_ids_column] = "document_ids";
+		column_names[token_shards_column] = "token_shards";
+		column_names[indexes_column] = "indexes";
+		column_names[meta_column] = "meta";
 	}
 };
 
@@ -194,14 +202,13 @@ struct disk_token {
 	disk_token(const std::vector<size_t> &s): shards(s) {}
 };
 
-
-class disk_index_merge_operator : public rocksdb::MergeOperator {
+class indexes_merge_operator : public rocksdb::MergeOperator {
 public:
 	virtual const char* Name() const override {
-		return "disk_index_merge_operator";
+		return "indexes_merge_operator";
 	}
 
-	bool merge_index(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
+	bool merge_indexes(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
 			const std::deque<std::string>& operand_list,
 			std::string* new_value,
 			rocksdb::Logger *logger) const {
@@ -258,16 +265,47 @@ public:
 		return true;
 	}
 
-	template <typename T>
-	std::string dump_iterable(const T &iter) const {
-		std::ostringstream ss;
-		for (auto it = iter.begin(), end = iter.end(); it != end; ++it) {
-			if (it != iter.begin())
-				ss << " ";
-			ss << *it;
-		}
-		return ss.str();
+	virtual bool FullMerge(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
+			const std::deque<std::string>& operand_list,
+			std::string* new_value,
+			rocksdb::Logger *logger) const override {
+		return merge_indexes(key, old_value, operand_list, new_value, logger);
 	}
+
+	virtual bool PartialMerge(const rocksdb::Slice& key,
+			const rocksdb::Slice& left_operand, const rocksdb::Slice& right_operand,
+			std::string* new_value,
+			rocksdb::Logger* logger) const {
+#if 0
+		auto dump = [](const rocksdb::Slice &v) {
+			std::ostringstream ss;
+
+			msgpack::unpacked msg;
+			msgpack::unpack(&msg, v.data(), v.size());
+
+			ss << msg.get();
+			return ss.str();
+		};
+
+		printf("partial merge: key: %s, left: %s, right: %s\n",
+				key.ToString().c_str(), dump(left_operand).c_str(), dump(right_operand).c_str());
+#endif
+		(void) key;
+		(void) left_operand;
+		(void) right_operand;
+		(void) new_value;
+		(void) logger;
+
+		return false;
+	}
+};
+
+class token_shards_merge_operator : public rocksdb::MergeOperator {
+public:
+	virtual const char* Name() const override {
+		return "token_shards_merge_operator";
+	}
+
 	bool merge_token_shards(const rocksdb::Slice& key, const rocksdb::Slice* old_value,
 			const std::deque<std::string>& operand_list,
 			std::string* new_value,
@@ -315,14 +353,7 @@ public:
 			const std::deque<std::string>& operand_list,
 			std::string* new_value,
 			rocksdb::Logger *logger) const override {
-		if (key.starts_with(rocksdb::Slice("token_shards."))) {
-			return merge_token_shards(key, old_value, operand_list, new_value, logger);
-		}
-		if (key.starts_with(rocksdb::Slice("index."))) {
-			return merge_index(key, old_value, operand_list, new_value, logger);
-		}
-
-		return false;
+		return merge_token_shards(key, old_value, operand_list, new_value, logger);
 	}
 
 	virtual bool PartialMerge(const rocksdb::Slice& key,
@@ -369,12 +400,18 @@ public:
 		return m_meta;
 	}
 
+	rocksdb::ColumnFamilyHandle *cfhandle(int c) {
+		return m_handles[c];
+	}
+
 	void compact() {
 		if (m_db) {
-			struct rocksdb::CompactRangeOptions opts;
-			opts.change_level = true;
-			opts.target_level = 0;
-			m_db->CompactRange(opts, NULL, NULL);
+			for (auto h: m_handles) {
+				struct rocksdb::CompactRangeOptions opts;
+				opts.change_level = true;
+				opts.target_level = 0;
+				m_db->CompactRange(opts, h, NULL, NULL);
+			}
 		}
 	}
 
@@ -394,9 +431,10 @@ public:
 
 		rocksdb::Status s;
 		if (batch) {
-			batch->Put(rocksdb::Slice(m_opts.metadata_key), rocksdb::Slice(meta_serialized));
+			batch->Put(m_handles[options::meta_column], rocksdb::Slice(m_opts.metadata_key), rocksdb::Slice(meta_serialized));
 		} else {
-			s = m_db->Put(rocksdb::WriteOptions(), rocksdb::Slice(m_opts.metadata_key), rocksdb::Slice(meta_serialized));
+			s = m_db->Put(rocksdb::WriteOptions(), m_handles[options::meta_column],
+					rocksdb::Slice(m_opts.metadata_key), rocksdb::Slice(meta_serialized));
 		}
 
 		if (!s.ok()) {
@@ -445,7 +483,6 @@ public:
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
 
-		dbo.merge_operator.reset(new disk_index_merge_operator);
 
 		dbo.statistics = rocksdb::CreateDBStatistics();
 		dbo.stats_dump_period_sec = 60;
@@ -458,10 +495,28 @@ public:
 		rocksdb::DB *db;
 		rocksdb::Status s;
 
+		rocksdb::ColumnFamilyOptions cfo(dbo);
+
+		std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
+		for (size_t i = 0; i < options().column_names.size(); ++i) {
+			auto cname = options().column_names[i];
+
+			cfo.merge_operator.reset();
+
+			if (i == greylock::options::token_shards_column) {
+				cfo.merge_operator.reset(new token_shards_merge_operator);
+			}
+			if (i == greylock::options::indexes_column) {
+				cfo.merge_operator.reset(new indexes_merge_operator);
+			}
+
+			column_families.push_back(rocksdb::ColumnFamilyDescriptor(cname, cfo));
+		}
+
 		if (ro) {
-			s = rocksdb::DB::OpenForReadOnly(dbo, path, &db);
+			s = rocksdb::DB::OpenForReadOnly(dbo, path, column_families, &m_handles, &db);
 		} else {
-			s = rocksdb::DB::Open(dbo, path, &db);
+			s = rocksdb::DB::Open(dbo, path, column_families, &m_handles, &db);
 		}
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "failed to open rocksdb database: '%s', read-only: %d, error: %s",
@@ -471,7 +526,7 @@ public:
 		m_ro = ro;
 
 		std::string meta;
-		s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(m_opts.metadata_key), &meta);
+		s = m_db->Get(rocksdb::ReadOptions(), m_handles[options::meta_column], rocksdb::Slice(m_opts.metadata_key), &meta);
 		if (!s.ok() && !s.IsNotFound()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s",
 					m_opts.metadata_key.c_str(), s.ToString().c_str());
@@ -498,7 +553,7 @@ public:
 		}
 
 		std::string ser_shards;
-		auto err = read(key, &ser_shards);
+		auto err = read(options::token_shards_column, key, &ser_shards);
 		if (err)
 			return dt.shards;
 
@@ -509,16 +564,16 @@ public:
 		return dt.shards;
 	}
 
-	rocksdb::Iterator *iterator(const rocksdb::ReadOptions &ro) {
-		return m_db->NewIterator(ro);
+	rocksdb::Iterator *iterator(int column, const rocksdb::ReadOptions &ro) {
+		return m_db->NewIterator(ro, m_handles[column]);
 	}
 
-	greylock::error_info read(const std::string &key, std::string *ret) {
+	greylock::error_info read(int column, const std::string &key, std::string *ret) {
 		if (!m_db) {
 			return greylock::create_error(-EINVAL, "database is not opened");
 		}
 
-		auto s = m_db->Get(rocksdb::ReadOptions(), rocksdb::Slice(key), ret);
+		auto s = m_db->Get(rocksdb::ReadOptions(), m_handles[column], rocksdb::Slice(key), ret);
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s", key.c_str(), s.ToString().c_str());
 		}
@@ -544,7 +599,7 @@ public:
 		return greylock::error_info();
 	}
 
-	greylock::error_info write(const std::string &key, const std::string &value) {
+	greylock::error_info write(int column, const std::string &key, const std::string &value) {
 		if (!m_db) {
 			return greylock::create_error(-EINVAL, "database is not opened");
 		}
@@ -555,7 +610,7 @@ public:
 
 		auto wo = rocksdb::WriteOptions();
 
-		auto s = m_db->Merge(wo, rocksdb::Slice(key), rocksdb::Slice(value));
+		auto s = m_db->Merge(wo, m_handles[column], rocksdb::Slice(key), rocksdb::Slice(value));
 		if (!s.ok()) {
 			return greylock::create_error(-s.code(), "could not write batch: %s", s.ToString().c_str());
 		}
@@ -565,6 +620,7 @@ public:
 
 private:
 	bool m_ro = false;
+	std::vector<rocksdb::ColumnFamilyHandle*> m_handles;
 	std::unique_ptr<rocksdb::DB> m_db;
 	greylock::options m_opts;
 	greylock::metadata m_meta;
