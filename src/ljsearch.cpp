@@ -733,6 +733,7 @@ private:
 
 		std::unique_lock<std::mutex> guard(m_lock);
 		m_wstats.written_data_size += doc_serialized.size() + doc_indexed_id_serialized.size();
+		m_wstats.documents++;
 
 		return ribosome::error_info();
 	}
