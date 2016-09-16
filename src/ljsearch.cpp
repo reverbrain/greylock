@@ -249,6 +249,10 @@ public:
 	}
 
 	ribosome::error_info index(greylock::document &doc) {
+		if (doc.is_comment)
+			doc.mbox = "comment";
+		else
+			doc.mbox = "post";
 		std::string mbox = doc.mbox;
 
 		auto err = generate_indexes(doc);
@@ -498,6 +502,109 @@ public:
 		return convert_to_document(std::move(p));
 	}
 
+	ribosome::error_info process(greylock::document &doc) {
+		ribosome::split spl;
+		bool numbers_only = true;
+
+		auto split_content = [&] (const std::string &content, greylock::attribute *a) {
+			std::set<std::string> stems;
+
+			auto get_stem = [&] (const std::string &word, const ribosome::lstring &idx) -> std::string {
+				std::string *stem_ptr = m_word_cache.get(word);
+				if (!stem_ptr) {
+					std::string lang = m_lch.language(word, idx);
+					std::string stem = m_stemmer.stem(word, lang, "");
+					m_word_cache.insert(word, stem);
+
+					stems.insert(stem);
+					return stem;
+				} else {
+					stems.insert(*stem_ptr);
+					return *stem_ptr;
+				}
+			};
+
+
+			ribosome::lstring lt = ribosome::lconvert::from_utf8(content);
+			auto lower_request = ribosome::lconvert::to_lower(lt);
+
+			auto all_words = spl.convert_split_words_allow_alphabet(lower_request, supported_alphabet);
+			for (size_t pos = 0; pos < all_words.size(); ++pos) {
+				auto &idx = all_words[pos];
+				std::string word = ribosome::lconvert::to_string(idx);
+
+				if (numbers_alphabet.ok(idx)) {
+					stems.emplace(word);
+					continue;
+				}
+
+				numbers_only = false;
+
+				if (idx.size() >= m_db.options().ngram_index_size) {
+					get_stem(word, idx);
+				} else {
+					if (pos > 0) {
+						auto &prev = all_words[pos - 1];
+						auto prev_word = ribosome::lconvert::to_string(prev);
+						auto st = get_stem(prev_word, prev);
+						stems.emplace(st + word);
+					}
+
+					if (pos < all_words.size() - 1) {
+						auto &next = all_words[pos + 1];
+						auto next_word = ribosome::lconvert::to_string(next);
+						auto st = get_stem(next_word, next);
+						stems.emplace(word + st);
+					}
+				}
+			}
+
+			if (stems.size()) {
+				m_wstats.processed_text_size += content.size();
+
+				for (auto &s: stems) {
+					a->tokens.emplace_back(s);
+				}
+			} else {
+				m_wstats.skipped_text_size += content.size();
+			}
+		};
+
+		greylock::attribute ft("fixed_title");
+		greylock::attribute fc("fixed_content");
+		greylock::attribute urls("urls");
+
+		split_content(doc.ctx.content, &fc);
+		split_content(doc.ctx.title, &ft);
+
+		if ((ft.tokens.empty() && fc.tokens.empty()) || numbers_only) {
+			m_wstats.skipped_documents++;
+			return ribosome::error_info();
+		}
+
+		for (auto &url: doc.ctx.links) {
+			auto all_urls = spl.convert_split_words(url.c_str(), url.size());
+			for (auto &u: all_urls) {
+				urls.insert(ribosome::lconvert::to_string(u), 0);
+			}
+		}
+		for (auto &url: doc.ctx.images) {
+			auto all_urls = spl.convert_split_words(url.c_str(), url.size());
+			for (auto &u: all_urls) {
+				urls.insert(ribosome::lconvert::to_string(u), 0);
+			}
+		}
+
+
+		doc.idx.attributes.emplace_back(ft);
+		doc.idx.attributes.emplace_back(fc);
+		doc.idx.attributes.emplace_back(urls);
+
+		std::unique_lock<std::mutex> guard(m_lock);
+		m_wstats.lines++;		
+		return m_index_cache.index(doc);
+	}
+
 	const worker_stats &wstats() {
 		m_wstats.cstats = m_word_cache.cstats();
 		return m_wstats;
@@ -572,9 +679,12 @@ private:
 			}
 		};
 
-		doc.assign_id("", m_db.metadata().get_sequence(), p.issued, 0);
-		doc.id = cut_scheme(p.id);
-		replace_minus(doc.id);
+		std::string id = cut_scheme(p.id);
+		replace_minus(id);
+
+		doc.assign_id("", std::hash<std::string>{}(id), p.issued, 0);
+		//doc.assign_id("", m_db.metadata().get_sequence(), p.issued, 0);
+		doc.id = std::move(id);
 
 		if (p.author.size()) {
 			doc.author = cut_scheme(p.author);
@@ -586,121 +696,22 @@ private:
 			}
 		}
 
-		if (p.is_comment)
-			doc.mbox = "comment";
-		else
-			doc.mbox = "post";
+		doc.is_comment = p.is_comment;
 
-		ribosome::split spl;
-		bool numbers_only = true;
-
-		auto split_content = [&] (const std::string &content, greylock::attribute *a) {
-			std::set<std::string> stems;
-
+		auto parse = [&] (const std::string &content) {
 			m_html.feed_text(content);
 
 			doc.ctx.links.insert(doc.ctx.links.end(), m_html.links().begin(), m_html.links().end());
 			doc.ctx.images.insert(doc.ctx.images.end(), m_html.images().begin(), m_html.images().end());
 
-			auto get_stem = [&] (const std::string &word, const ribosome::lstring &idx) -> std::string {
-				std::string *stem_ptr = m_word_cache.get(word);
-				if (!stem_ptr) {
-					std::string lang = m_lch.language(word, idx);
-					std::string stem = m_stemmer.stem(word, lang, "");
-					m_word_cache.insert(word, stem);
-
-					stems.insert(stem);
-					return stem;
-				} else {
-					stems.insert(*stem_ptr);
-					return *stem_ptr;
-				}
-			};
-
-
-			for (auto &t: m_html.tokens()) {
-				ribosome::lstring lt = ribosome::lconvert::from_utf8(t);
-				auto lower_request = ribosome::lconvert::to_lower(lt);
-
-				auto all_words = spl.convert_split_words_allow_alphabet(lower_request, supported_alphabet);
-				for (size_t pos = 0; pos < all_words.size(); ++pos) {
-					auto &idx = all_words[pos];
-					std::string word = ribosome::lconvert::to_string(idx);
-
-					if (numbers_alphabet.ok(idx)) {
-						stems.emplace(word);
-						continue;
-					}
-
-					numbers_only = false;
-
-					if (idx.size() >= m_db.options().ngram_index_size) {
-						get_stem(word, idx);
-					} else {
-						if (pos > 0) {
-							auto &prev = all_words[pos - 1];
-							auto prev_word = ribosome::lconvert::to_string(prev);
-							auto st = get_stem(prev_word, prev);
-							stems.emplace(st + word);
-						}
-
-						if (pos < all_words.size() - 1) {
-							auto &next = all_words[pos + 1];
-							auto next_word = ribosome::lconvert::to_string(next);
-							auto st = get_stem(next_word, next);
-							stems.emplace(word + st);
-						}
-					}
-				}
-			}
-
-			if (stems.size()) {
-				m_wstats.processed_text_size += content.size();
-
-				for (auto &s: stems) {
-					a->tokens.emplace_back(s);
-				}
-			} else {
-				m_wstats.skipped_text_size += content.size();
-			}
+			return m_html.text(" ");
 		};
 
-		greylock::attribute ft("fixed_title");
-		greylock::attribute fc("fixed_content");
-		greylock::attribute urls("urls");
+		doc.ctx.content = parse(p.content);
+		doc.ctx.title = parse(p.title);
 
-		split_content(p.content, &fc);
-		split_content(p.title, &ft);
-
+		m_wstats.processed_text_size += p.content.size() + p.title.size();
 		m_wstats.lines++;
-
-		if ((ft.tokens.empty() && fc.tokens.empty()) || numbers_only) {
-			m_wstats.skipped_documents++;
-			return ribosome::error_info();
-		}
-
-		for (auto &url: doc.ctx.links) {
-			auto all_urls = spl.convert_split_words(url.c_str(), url.size());
-			for (auto &u: all_urls) {
-				urls.insert(ribosome::lconvert::to_string(u), 0);
-			}
-		}
-
-		doc.ctx.content = std::move(p.content);
-		doc.ctx.title = std::move(p.title);
-
-		doc.idx.attributes.emplace_back(ft);
-		doc.idx.attributes.emplace_back(fc);
-		doc.idx.attributes.emplace_back(urls);
-
-		std::unique_lock<std::mutex> guard(m_lock);
-		auto err = m_index_cache.index(doc);
-		if (err) {
-			return err;
-		}
-
-		guard.unlock();
-
 		return write_document(doc);
 	}
 
@@ -708,12 +719,12 @@ private:
 		rocksdb::WriteBatch batch;
 
 		std::string doc_serialized = serialize(doc);
-		std::string dkey = m_db.options().document_prefix + doc.indexed_id.to_string();
-		batch.Put(rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
+		// may not be rvalue, otherwise batch will cache stall pointer
+		std::string dkey = doc.indexed_id.to_string();
+		batch.Put(m_db.cfhandle(greylock::options::documents_column), rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
 
 		std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
-		std::string dids_key = m_db.options().document_id_prefix + doc.id;
-		batch.Put(rocksdb::Slice(dids_key), rocksdb::Slice(doc_indexed_id_serialized));
+		batch.Put(m_db.cfhandle(greylock::options::document_ids_column), rocksdb::Slice(doc.id), rocksdb::Slice(doc_indexed_id_serialized));
 
 		auto err = m_db.write(&batch);
 		if (err) {
@@ -773,7 +784,7 @@ struct parse_stats {
 		return *this;
 	}
 
-	std::string print_stats() {
+	std::string print_stats() const {
 		char buf[1024];
 		size_t sz = snprintf(buf, sizeof(buf),
 			"skipped_documents: %ld, skipped_text: %.2f MBs, processed_text: %.2f MBs, "
@@ -787,6 +798,7 @@ struct parse_stats {
 	}
 };
 
+template <typename ET = std::string>
 class lj_parser {
 public:
 	lj_parser(int n, const struct cache_control &cc) : m_cc(cc) {
@@ -808,7 +820,7 @@ public:
 			t.join();
 		}
 
-		sync_wait();
+		sync_wait_completed();
 		m_sync_thread.join();
 
 		write_indexes();
@@ -826,6 +838,14 @@ public:
 		return ribosome::error_info();
 	}
 
+	ribosome::error_info open_read_only(const std::string &dbpath) {
+		auto err = m_db.open_read_only(dbpath);
+		if (err)
+			return ribosome::create_error(err.code(), "%s", err.message().c_str());
+
+		return ribosome::error_info();
+	}
+
 	ribosome::error_info load_langdetect_stats(const std::string &path) {
 		return m_lch.load_langdetect_stats(path.c_str());
 	}
@@ -834,7 +854,7 @@ public:
 		return m_lch.load_language_model(lm);
 	}
 
-	void queue_work(std::string &&str) {
+	void queue_work(ET &&str) {
 		std::unique_lock<std::mutex> guard(m_lock);
 		m_lines.emplace_back(std::move(str));
 
@@ -871,7 +891,7 @@ public:
 	};
 
 	template <typename T, typename C>
-	void iterate(std::vector<iter<T>> &its, rocksdb::WriteBatch *batch, std::function<std::string (const C&)> sfunc) {
+	void iterate(std::vector<iter<T>> &its, int column, rocksdb::WriteBatch *batch, std::function<std::string (const C&)> sfunc) {
 		while (true) {
 			std::string name;
 
@@ -920,7 +940,7 @@ public:
 
 
 			std::string sdata = sfunc(c);
-			batch->Merge(rocksdb::Slice(name), rocksdb::Slice(sdata));
+			batch->Merge(m_db.cfhandle(column), rocksdb::Slice(name), rocksdb::Slice(sdata));
 		}
 	}
 
@@ -981,7 +1001,8 @@ public:
 
 		// time to create and join a thread is about 1ms on i7
 		std::thread index_thread([&] () {
-			iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter, &index_batch,
+			iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter,
+					greylock::options::indexes_column, &index_batch,
 				[&] (const std::set<greylock::document_for_index> &c) {
 					indexes_num += c.size();
 					indexes_sets += 1;
@@ -1000,7 +1021,8 @@ public:
 			indexes_write_error = m_db.write(&index_batch);
 		});
 
-		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter, &shards_batch,
+		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter,
+					greylock::options::token_shards_column, &shards_batch,
 				[&] (const std::set<size_t> &c) {
 					shards_num += c.size();
 					shards_sets += 1;
@@ -1072,6 +1094,16 @@ public:
 		m_sync_wait.wait(guard, [&] () { return m_sync_state != sync_scheduled; });
 	}
 
+	void sync_wait_completed() {
+		std::unique_lock<std::mutex> guard(m_sync_lock);
+		if (m_sync_state == sync_exited)
+			return;
+
+		m_sync_state = sync_scheduled;
+		m_sync_wait.notify_one();
+		m_sync_wait.wait(guard, [&] () { return m_sync_state == sync_scheduled || m_sync_state == sync_exited; });
+	}
+
 
 private:
 	greylock::database m_db;
@@ -1082,7 +1114,7 @@ private:
 
 	bool m_need_exit = false;
 	std::mutex m_lock;
-	std::list<std::string> m_lines;
+	std::list<ET> m_lines;
 	std::condition_variable m_pool_wait, m_parser_wait;
 	std::vector<std::thread> m_pool;
 
@@ -1129,7 +1161,7 @@ private:
 			m_pool_wait.wait_for(guard, std::chrono::milliseconds(100), [&] {return !m_lines.empty();});
 
 			while (!m_lines.empty()) {
-				std::string line = std::move(m_lines.front());
+				ET line = std::move(m_lines.front());
 				m_lines.pop_front();
 				guard.unlock();
 
@@ -1160,14 +1192,15 @@ int main(int argc, char *argv[])
 
 	std::vector<std::string> als;
 	std::vector<std::string> lang_models;
-	std::string input, output, lang_path;
+	std::string input, output, indexdb, lang_path;
 	size_t rewind = 0;
 	int thread_num;
 	cache_control cc;
 	long print_interval;
 	generic.add_options()
 		("help", "This help message")
-		("input", bpo::value<std::string>(&input)->required(), "Livejournal dump file packed with bzip2")
+		("input", bpo::value<std::string>(&input), "Livejournal dump file packed with bzip2")
+		("indexdb", bpo::value<std::string>(&indexdb), "Rocksdb database where livejournal posts are stored")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of parser threads")
@@ -1179,7 +1212,7 @@ int main(int argc, char *argv[])
 			"Per-thread index cache flush interval in seconds")
 		("index-cached-documents", bpo::value<long>(&cc.index_cached_documents)->default_value(1000),
 			"Maximum number of documents parsed and cached per thread")
-		("lang_stats", bpo::value<std::string>(&lang_path)->required(), "Language stats file")
+		("lang_stats", bpo::value<std::string>(&lang_path), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
 			"Language models, format: language:model_path")
 		;
@@ -1206,52 +1239,7 @@ int main(int argc, char *argv[])
 	signal(SIGTERM, signal_handler);
 	signal(SIGINT, signal_handler);
 
-	for (auto &a: als) {
-		supported_alphabet.merge(a);
-	}
-
-	lj_parser parser(thread_num, cc);
-	auto err = parser.load_langdetect_stats(lang_path);
-	if (err) {
-		std::cerr << "could not open load language stats: " << err.message() << std::endl;
-		return err.code();
-	}
-
-	for (const auto &mp: lang_models) {
-		size_t pos = mp.find(':');
-		if (pos == std::string::npos) {
-			std::cerr << "invalid language model path: " << mp << std::endl;
-			return -1;
-		}
-
-		warp::language_model lm;
-		lm.language = mp.substr(0, pos);
-		lm.lang_model_path = mp.substr(pos+1);
-
-		err = parser.load_language_model(lm);
-		if (err) {
-			std::cerr << "could not load language model: " << err.message() << std::endl;
-			return err.code();
-		}
-	}
-
-	err = parser.open(output);
-	if (err) {
-		std::cerr << "could not open rocksdb database: " << err.message() << std::endl;
-		return err.code();
-	}
-
-
-	namespace bio = boost::iostreams;
 	ribosome::timer tm, realtm, last_print;
-
-	std::ifstream file(input, std::ios::in | std::ios::binary);
-	bio::filtering_streambuf<bio::input> bin;
-	bin.push(bio::gzip_decompressor());
-	bin.push(file);
-
-	std::istream in(&bin);
-
 
 	size_t rewind_lines = rewind;
 	size_t total_size = 0;
@@ -1259,13 +1247,12 @@ int main(int argc, char *argv[])
 
 	parse_stats prev_ps;
 
-	auto print_stats = [&] () -> char * {
+	auto print_stats = [&] (const parse_stats &ps) -> char * {
 		struct timespec ts;
 		clock_gettime(CLOCK_REALTIME, &ts);
 
 		static char tmp[1024];
 
-		parse_stats ps = parser.pstats();
 		parse_stats dps = ps - prev_ps;
 
 		snprintf(tmp, sizeof(tmp),
@@ -1281,47 +1268,153 @@ int main(int argc, char *argv[])
 		return tmp;
 	};
 
-	std::string line;
-	while (std::getline(in, line) && !global_need_exit) {
-		total_size += line.size();
 
-		if (rewind > 0) {
-			--rewind;
+	if (input.size()) {
+		lj_parser<std::string> parser(thread_num, cc);
+		auto err = parser.open(output);
+		if (err) {
+			std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
+			return err.code();
+		}
+
+
+		namespace bio = boost::iostreams;
+
+		std::ifstream file(input, std::ios::in | std::ios::binary);
+		bio::filtering_streambuf<bio::input> bin;
+		bin.push(bio::gzip_decompressor());
+		bin.push(file);
+
+		std::istream in(&bin);
+		std::string line;
+
+		while (std::getline(in, line) && !global_need_exit) {
+			total_size += line.size();
+
+			if (rewind > 0) {
+				--rewind;
+
+				if (last_print.elapsed() > print_interval) {
+					printf("%s, rewind: %ld\n", print_stats(parser.pstats()), rewind);
+				}
+
+				if (rewind == 0) {
+					realtm.restart();
+					printf("\n");
+				}
+				continue;
+			}
+
+			real_size += line.size();
+
+			parser.queue_work(std::move(line));
 
 			if (last_print.elapsed() > print_interval) {
-				printf("%s, rewind: %ld\n", print_stats(), rewind);
+				printf("%s\n", print_stats(parser.pstats()));
 			}
-
-			if (rewind == 0) {
-				realtm.restart();
-				printf("\n");
-			}
-			continue;
 		}
 
-		real_size += line.size();
+		printf("\n%s\n", print_stats(parser.pstats()));
 
-		parser.queue_work(std::move(line));
-
-		if (last_print.elapsed() > print_interval) {
-			printf("%s\n", print_stats());
+		if (vm.count("compact")) {
+			tm.restart();
+			printf("Starting compaction\n");
+			parser.compact();
+			printf("Compaction1 completed, time: %ld seconds\n", tm.restart() / 1000);
+			parser.compact();
+			printf("Compaction2 completed, time: %ld seconds\n", tm.restart() / 1000);
+		}
+	} else if (indexdb.size()) {
+		if (lang_path.empty()) {
+			std::cerr << "indexing requires language detector" << std::endl;
+			return -ENOENT;
 		}
 
+		lj_parser<greylock::document> parser(thread_num, cc);
+		auto err = parser.open(output);
+		if (err) {
+			std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
+			return err.code();
+		}
+
+		greylock::database idb;
+		auto gerr = idb.open_read_only(indexdb);
+		if (gerr) {
+			std::cerr << "could not open in read-only mode input rocksdb database: " << gerr.message() << std::endl;
+			return gerr.code();
+		}
+
+		for (auto &a: als) {
+			supported_alphabet.merge(a);
+		}
+		err = parser.load_langdetect_stats(lang_path);
+		if (err) {
+			std::cerr << "could not open load language stats: " << err.message() << std::endl;
+			return err.code();
+		}
+
+		for (const auto &mp: lang_models) {
+			size_t pos = mp.find(':');
+			if (pos == std::string::npos) {
+				std::cerr << "invalid language model path: " << mp << std::endl;
+				return -1;
+			}
+
+			warp::language_model lm;
+			lm.language = mp.substr(0, pos);
+			lm.lang_model_path = mp.substr(pos+1);
+
+			err = parser.load_language_model(lm);
+			if (err) {
+				std::cerr << "could not load language model: " << err.message() << std::endl;
+				return err.code();
+			}
+		}
+
+		auto it = idb.iterator(greylock::options::documents_column, rocksdb::ReadOptions());
+		it->SeekToFirst();
+
+		if (!it->Valid()) {
+			auto s = it->status();
+			fprintf(stderr, "iterator from database %s is not valid: %s [%d]", indexdb.c_str(), s.ToString().c_str(), s.code());
+			return -s.code();
+		}
+		for (; it->Valid(); it->Next()) {
+			auto sl = it->value();
+
+			greylock::document doc;
+			gerr = deserialize(doc, sl.data(), sl.size());
+			if (gerr) {
+				fprintf(stderr, "could not deserialize document, key: %s, size: %ld, error: %s [%d]\n",
+						it->key().ToString().c_str(), sl.size(), gerr.message().c_str(), gerr.code());
+				return gerr.code();
+			}
+
+			total_size += doc.ctx.content.size() + doc.ctx.title.size();
+			real_size += doc.ctx.content.size() + doc.ctx.title.size();
+
+			parser.queue_work(std::move(doc));
+			if (last_print.elapsed() > print_interval) {
+				printf("%s\n", print_stats(parser.pstats()));
+			}
+		}
+
+		parser.sync_wait_completed();
+		parser.write_indexes();
+
+		printf("\n%s\n", print_stats(parser.pstats()));
+
+		if (vm.count("compact")) {
+			tm.restart();
+			printf("Starting compaction\n");
+			parser.compact();
+			printf("Compaction1 completed, time: %ld seconds\n", tm.restart() / 1000);
+			parser.compact();
+			printf("Compaction2 completed, time: %ld seconds\n", tm.restart() / 1000);
+		}
+
+
 	}
-	parser.sync_wait();
-	parser.write_indexes();
-
-	printf("\n%s\n", print_stats());
-
-	if (vm.count("compact")) {
-		tm.restart();
-		printf("Starting compaction\n");
-		parser.compact();
-		printf("Compaction1 completed, time: %ld seconds\n", tm.restart() / 1000);
-		parser.compact();
-		printf("Compaction2 completed, time: %ld seconds\n", tm.restart() / 1000);
-	}
-
 
 	return 0;
 }
