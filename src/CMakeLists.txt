@@ -19,6 +19,10 @@ target_link_libraries(greylock_server
 	greylock
 )
 
+add_executable(greylock_list list.cpp)
+target_link_libraries(greylock_list
+	greylock
+)
 add_executable(greylock_meta meta.cpp)
 target_link_libraries(greylock_meta
 	greylock
