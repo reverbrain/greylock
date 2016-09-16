@@ -524,7 +524,6 @@ public:
 				}
 			};
 
-
 			ribosome::lstring lt = ribosome::lconvert::from_utf8(content);
 			auto lower_request = ribosome::lconvert::to_lower(lt);
 
@@ -601,7 +600,7 @@ public:
 		doc.idx.attributes.emplace_back(urls);
 
 		std::unique_lock<std::mutex> guard(m_lock);
-		m_wstats.lines++;		
+		m_wstats.lines++;
 		return m_index_cache.index(doc);
 	}
 
