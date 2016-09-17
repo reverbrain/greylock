@@ -982,6 +982,8 @@ public:
 			shard_iter.emplace_back(idx->token_shards());
 		}
 
+		greylock::id_t last_document;
+
 		long indexes_num = 0;
 		long shards_num = 0;
 		long indexes_data_size = 0;
@@ -1006,8 +1008,13 @@ public:
 				[&] (const std::set<greylock::document_for_index> &c) {
 					indexes_num += c.size();
 					indexes_sets += 1;
+
 					greylock::disk_index di;
 					di.ids.insert(di.ids.end(), c.begin(), c.end());
+
+					if (di.ids.back().indexed_id > last_document) {
+						last_document = di.ids.back().indexed_id;
+					}
 					std::string ret = serialize(di);
 					indexes_data_size += ret.size();
 					return ret;
@@ -1072,13 +1079,15 @@ public:
 			printf("write_indexes: started: %s, workers: %ld, documents: %ld/%ld, swap: %ld, "
 				"indexes: %ld, size: %ld, sets: %ld, mean per index: %.1f, iteration: %ld, "
 				"shards: %ld, size: %ld, sets: %ld, mean per shard: %.1f iteration: %ld, "
-				"indexes_clear: %ld, db_write: indexes: %ld, shards: %ld, total_time: %ld\n",
+				"indexes_clear: %ld, db_write: indexes: %ld, shards: %ld, total_time: %ld, "
+				"last_document: %s\n",
 				print_time(start.tv_sec, start.tv_nsec),
 				m_workers.size(), documents, m_icache_wstats.documents, swap_time,
 				indexes_num, indexes_data_size, indexes_sets, (float)indexes_num / (float)indexes_sets,
 					token_indexes_iter_time,
 				shards_num, shards_data_size, indexes_sets, (float)shards_num / (float)shards_sets, token_shards_iter_time,
-				indexes_clear_time, indexes_write_time, shards_write_time, total_tm.elapsed());
+				indexes_clear_time, indexes_write_time, shards_write_time, total_tm.elapsed(),
+				last_document.to_string().c_str());
 		}
 
 		return greylock::error_info();
@@ -1195,6 +1204,7 @@ int main(int argc, char *argv[])
 	std::string input, output, indexdb, lang_path;
 	size_t rewind = 0;
 	int thread_num;
+	std::string rewind_doc;
 	cache_control cc;
 	long print_interval;
 	generic.add_options()
@@ -1203,6 +1213,7 @@ int main(int argc, char *argv[])
 		("indexdb", bpo::value<std::string>(&indexdb), "Rocksdb database where livejournal posts are stored")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
+		("rewind-doc", bpo::value<std::string>(&rewind_doc), "Rewind document iterator to this document id")
 		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of parser threads")
 		("alphabet", bpo::value<std::vector<std::string>>(&als)->composing(), "Allowed alphabet")
 		("compact", "Compact database on exit")
@@ -1372,7 +1383,11 @@ int main(int argc, char *argv[])
 		}
 
 		auto it = idb.iterator(greylock::options::documents_column, rocksdb::ReadOptions());
-		it->SeekToFirst();
+		if (rewind_doc.size()) {
+			it->Seek(rewind_doc);
+		} else {
+			it->SeekToFirst();
+		}
 
 		if (!it->Valid()) {
 			auto s = it->status();
