@@ -1394,6 +1394,9 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "iterator from database %s is not valid: %s [%d]", indexdb.c_str(), s.ToString().c_str(), s.code());
 			return -s.code();
 		}
+
+		realtm.restart();
+
 		for (; it->Valid(); it->Next()) {
 			auto sl = it->value();
 
