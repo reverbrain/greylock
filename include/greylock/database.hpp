@@ -258,8 +258,12 @@ public:
 		*new_value = serialize(index);
 
 		if (new_value->size() > 1024 * 1024) {
+			size_t osize = 0;
+			if (old_value) {
+				osize = old_value->size();
+			}
 			rocksdb::Warn(logger, "index_merge: key: %s, size: %ld -> %ld",
-					key.ToString().c_str(), old_value->size(), new_value->size());
+					key.ToString().c_str(), osize, new_value->size());
 		}
 
 		return true;
@@ -342,8 +346,13 @@ public:
 		*new_value = serialize(dt);
 
 		if (new_value->size() > 1024 * 1024) {
+			size_t osize = 0;
+			if (old_value) {
+				osize = old_value->size();
+			}
+
 			rocksdb::Warn(logger, "shard_merge: key: %s, size: %ld -> %ld",
-					key.ToString().c_str(), old_value->size(), new_value->size());
+					key.ToString().c_str(), osize, new_value->size());
 		}
 
 		return true;
