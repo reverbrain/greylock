@@ -1201,7 +1201,8 @@ int main(int argc, char *argv[])
 
 	std::vector<std::string> als;
 	std::vector<std::string> lang_models;
-	std::string input, output, indexdb, lang_path;
+	std::string output, indexdb, lang_path;
+	std::vector<std::string> inputs;
 	size_t rewind = 0;
 	int thread_num;
 	std::string rewind_doc;
@@ -1209,7 +1210,7 @@ int main(int argc, char *argv[])
 	long print_interval;
 	generic.add_options()
 		("help", "This help message")
-		("input", bpo::value<std::string>(&input), "Livejournal dump file packed with bzip2")
+		("input", bpo::value<std::vector<std::string>>(&inputs)->composing(), "Livejournal dump files packed with bzip2")
 		("indexdb", bpo::value<std::string>(&indexdb), "Rocksdb database where livejournal posts are stored")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
@@ -1280,7 +1281,7 @@ int main(int argc, char *argv[])
 	};
 
 
-	if (input.size()) {
+	if (inputs.size()) {
 		lj_parser<std::string> parser(thread_num, cc);
 		auto err = parser.open(output);
 		if (err) {
@@ -1289,39 +1290,41 @@ int main(int argc, char *argv[])
 		}
 
 
-		namespace bio = boost::iostreams;
+		for (auto &input: inputs) {
+			namespace bio = boost::iostreams;
 
-		std::ifstream file(input, std::ios::in | std::ios::binary);
-		bio::filtering_streambuf<bio::input> bin;
-		bin.push(bio::gzip_decompressor());
-		bin.push(file);
+			std::ifstream file(input, std::ios::in | std::ios::binary);
+			bio::filtering_streambuf<bio::input> bin;
+			bin.push(bio::gzip_decompressor());
+			bin.push(file);
 
-		std::istream in(&bin);
-		std::string line;
+			std::istream in(&bin);
+			std::string line;
 
-		while (std::getline(in, line) && !global_need_exit) {
-			total_size += line.size();
+			while (std::getline(in, line) && !global_need_exit) {
+				total_size += line.size();
 
-			if (rewind > 0) {
-				--rewind;
+				if (rewind > 0) {
+					--rewind;
+
+					if (last_print.elapsed() > print_interval) {
+						printf("%s, rewind: %ld\n", print_stats(parser.pstats()), rewind);
+					}
+
+					if (rewind == 0) {
+						realtm.restart();
+						printf("\n");
+					}
+					continue;
+				}
+
+				real_size += line.size();
+
+				parser.queue_work(std::move(line));
 
 				if (last_print.elapsed() > print_interval) {
-					printf("%s, rewind: %ld\n", print_stats(parser.pstats()), rewind);
+					printf("%s\n", print_stats(parser.pstats()));
 				}
-
-				if (rewind == 0) {
-					realtm.restart();
-					printf("\n");
-				}
-				continue;
-			}
-
-			real_size += line.size();
-
-			parser.queue_work(std::move(line));
-
-			if (last_print.elapsed() > print_interval) {
-				printf("%s\n", print_stats(parser.pstats()));
 			}
 		}
 
