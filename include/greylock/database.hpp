@@ -472,7 +472,7 @@ public:
 		//dbo.disableDataSync = true;
 		dbo.IncreaseParallelism(m_opts.max_threads);
 
-		dbo.max_bytes_for_level_base = 1024 * 1024 * 1024 * 50UL;
+		dbo.max_bytes_for_level_base = 1024 * 1024 * 1024 * 100UL;
 		dbo.write_buffer_size = 1024 * 1024 * 1024UL;
 		dbo.max_write_buffer_number = 10;
 		dbo.min_write_buffer_number_to_merge = 4;
