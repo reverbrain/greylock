@@ -1254,11 +1254,35 @@ int main(int argc, char *argv[])
 	ribosome::timer tm, realtm, last_print;
 
 	size_t rewind_lines = rewind;
+	size_t prev_docs_lines = 0;
 	size_t total_size = 0;
 	size_t real_size = 0;
 
 	parse_stats prev_ps;
 
+	auto print_stats_docs = [&] (const parse_stats &ps) -> char * {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+
+		static char tmp[1024];
+
+		parse_stats dps = ps - prev_ps;
+
+		snprintf(tmp, sizeof(tmp),
+			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld [%ld], speed: %.2f MB/s %.2f [%.2f] lines/s, "
+				"processed_text: %.2f MBs, written data: %.2f MBs",
+			print_time(ts.tv_sec, ts.tv_nsec),
+			tm.elapsed() / 1000, total_size / (1024 * 1024.0),
+			ps.documents + rewind_lines,
+			ps.documents + rewind_lines - prev_docs_lines,
+			real_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
+			ps.lines * 1000.0 / (float)realtm.elapsed(), dps.lines * 1000.0 / (float)last_print.elapsed(),
+			ps.processed_text_size / 1024 / 1024.0, ps.written_data_size / 1024 / 1024.0);
+
+		prev_ps = ps;
+		last_print.restart();
+		return tmp;
+	};
 	auto print_stats = [&] (const parse_stats &ps) -> char * {
 		struct timespec ts;
 		clock_gettime(CLOCK_REALTIME, &ts);
@@ -1268,10 +1292,10 @@ int main(int argc, char *argv[])
 		parse_stats dps = ps - prev_ps;
 
 		snprintf(tmp, sizeof(tmp),
-			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, lines: %ld, speed: %.2f MB/s %.2f [%.2f] lines/s, %s",
+			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, speed: %.2f MB/s %.2f [%.2f] lines/s, %s",
 			print_time(ts.tv_sec, ts.tv_nsec),
 			tm.elapsed() / 1000, total_size / (1024 * 1024.0),
-			ps.documents + rewind_lines, ps.lines + rewind_lines,
+			ps.documents + rewind_lines,
 			real_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
 			ps.lines * 1000.0 / (float)realtm.elapsed(), dps.lines * 1000.0 / (float)last_print.elapsed(),
 			ps.print_stats().c_str());
@@ -1293,6 +1317,8 @@ int main(int argc, char *argv[])
 		for (auto &input: inputs) {
 			namespace bio = boost::iostreams;
 
+			printf("opening new input file: %s, documents processed so far: %ld\n", input.c_str(), prev_docs_lines);
+
 			std::ifstream file(input, std::ios::in | std::ios::binary);
 			bio::filtering_streambuf<bio::input> bin;
 			bin.push(bio::gzip_decompressor());
@@ -1308,7 +1334,7 @@ int main(int argc, char *argv[])
 					--rewind;
 
 					if (last_print.elapsed() > print_interval) {
-						printf("%s, rewind: %ld\n", print_stats(parser.pstats()), rewind);
+						printf("%s: rewind: %ld\n", input.c_str(), rewind);
 					}
 
 					if (rewind == 0) {
@@ -1323,12 +1349,14 @@ int main(int argc, char *argv[])
 				parser.queue_work(std::move(line));
 
 				if (last_print.elapsed() > print_interval) {
-					printf("%s\n", print_stats(parser.pstats()));
+					printf("%s: %s\n", input.c_str(), print_stats_docs(parser.pstats()));
 				}
 			}
+
+			prev_docs_lines = parser.pstats().documents + rewind_lines;
 		}
 
-		printf("\n%s\n", print_stats(parser.pstats()));
+		printf("\n%s\n", print_stats_docs(parser.pstats()));
 
 		if (vm.count("compact")) {
 			tm.restart();
