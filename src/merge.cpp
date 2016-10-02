@@ -2,6 +2,7 @@
 #include "greylock/types.hpp"
 
 #include <ribosome/error.hpp>
+#include <ribosome/timer.hpp>
 
 #include <boost/program_options.hpp>
 
@@ -11,7 +12,12 @@ using namespace ioremap;
 
 class merger {
 public:
+	merger(long print_interval) : m_print_interval(print_interval) {
+	}
+
 	void merge(int column, const std::string &output, const std::vector<std::string> &inputs, bool compact) {
+		ribosome::timer tm;
+
 		greylock::database odb;
 		auto err = odb.open_read_write(output);
 		if (err) {
@@ -118,6 +124,13 @@ public:
 			for (auto it = to_remove.rbegin(); it != to_remove.rend(); ++it) {
 				its.erase(its.begin() + (*it));
 			}
+
+			if (tm.elapsed() > m_print_interval) {
+				printf("merge: column: %s [%d], written keys: %ld, written data size: %ld, first_key: %s, last_key: %s\n",
+						odb.options().column_names[column].c_str(), column,
+						written_keys, data_size, first_key.c_str(), last_key.c_str());
+				tm.restart();
+			}
 		}
 
 		printf("merge: column: %s [%d], written keys: %ld, written data size: %ld, first_key: %s, last_key: %s\n",
@@ -140,6 +153,7 @@ public:
 		}
 	}
 private:
+	long m_print_interval;
 };
 
 int main(int argc, char *argv[])
@@ -152,6 +166,7 @@ int main(int argc, char *argv[])
 	std::vector<std::string> inputs;
 	int thread_num;
 	std::string column;
+	long print_interval;
 	generic.add_options()
 		("help", "This help message")
 		("column", bpo::value<std::string>(&column)->required(), "Column name to merge")
@@ -159,6 +174,7 @@ int main(int argc, char *argv[])
 		("input", bpo::value<std::vector<std::string>>(&inputs)->required()->composing(), "Input rocksdb database")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
 		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of merge threads")
+		("print-interval", bpo::value<long>(&print_interval)->default_value(10000), "Period to dump merge stats (in milliseconds)")
 		;
 
 	bpo::options_description cmdline_options;
@@ -190,7 +206,7 @@ int main(int argc, char *argv[])
 	auto column_id = std::distance(opt.column_names.begin(), it);
 
 	try {
-		merger m;
+		merger m(print_interval);
 		m.merge(column_id, output, inputs, vm.count("compact") != 0);
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
