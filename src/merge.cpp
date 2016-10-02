@@ -92,7 +92,7 @@ public:
 			for (auto pos: positions) {
 				auto &it = its[pos];
 
-				batch.Merge(key, it->value());
+				batch.Merge(odb.cfhandle(column), key, it->value());
 				ds += it->value().size();
 			}
 
