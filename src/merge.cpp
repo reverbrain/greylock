@@ -25,6 +25,8 @@ public:
 					output.c_str(), err.message().c_str());
 		}
 
+		printf("Output databse %s has been opened\n", output.c_str());
+
 		std::vector<std::unique_ptr<greylock::database>> dbs;
 		std::vector<rocksdb::Iterator *> its;
 		rocksdb::ReadOptions ro;
@@ -37,8 +39,12 @@ public:
 						path.c_str(), err.message().c_str());
 			}
 
+			printf("Input databse %s has been opened\n", path.c_str());
+
 			auto it = dbu->iterator(column, ro);
 			it->SeekToFirst();
+
+			printf("Input databse %s has been positioned\n", path.c_str());
 
 			if (!it->Valid()) {
 				auto s = it->status();
