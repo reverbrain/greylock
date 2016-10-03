@@ -146,7 +146,11 @@ public:
 			for (auto pos: positions) {
 				auto &it = its[pos];
 
-				batch.Merge(odb.cfhandle(column), key, it->value());
+				if ((column == greylock::options::token_shards_column) || (column == greylock::options::indexes_column)) {
+					batch.Merge(odb.cfhandle(column), key, it->value());
+				} else {
+					batch.Put(odb.cfhandle(column), key, it->value());
+				}
 				ds += it->value().size();
 			}
 
