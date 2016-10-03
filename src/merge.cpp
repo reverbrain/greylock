@@ -10,6 +10,20 @@
 
 using namespace ioremap;
 
+static inline const char *print_time(long tsec, long tnsec)
+{
+	char str[64];
+	struct tm tm;
+
+	static __thread char __dnet_print_time[128];
+
+	localtime_r((time_t *)&tsec, &tm);
+	strftime(str, sizeof(str), "%F %R:%S", &tm);
+
+	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) tnsec / 1000);
+	return __dnet_print_time;
+}
+
 class merger {
 public:
 	merger(long print_interval) : m_print_interval(print_interval) {
@@ -61,6 +75,34 @@ public:
 		long data_size = 0;
 		long written_keys = 0;
 		std::string first_key, last_key;
+		long prev_written_keys = 0;
+		long prev_data_size = 0;
+
+		ribosome::timer merge_tm;
+
+		auto print_stats = [&] () {
+			struct timespec ts;
+			clock_gettime(CLOCK_REALTIME, &ts);
+
+			float kspeed = (float)written_keys * 1000.0 / (float)merge_tm.elapsed();
+			float kspeed_moment = (float)(written_keys - prev_written_keys) * 1000.0 / (float)tm.elapsed();
+
+			float dspeed = (float)data_size * 1000.0 / (float)merge_tm.elapsed() / (1024.0 * 1024.0);
+			float dspeed_moment = (float)(data_size - prev_data_size) * 1000.0 / (float)tm.elapsed() / (1024.0 * 1024.0);
+
+			printf("%s: column: %s [%d], written keys: %ld, speed: %.2f [%.2f] keys/s, "
+				"written data size: %.2f MBs, speed: %.2f [%.2f] MB/s, "
+				"first_key: %s, last_key: %s\n",
+				print_time(ts.tv_sec, ts.tv_nsec),
+				odb.options().column_names[column].c_str(), column,
+				written_keys, kspeed, kspeed_moment,
+				(float)data_size / (1024.0 * 1024.0), dspeed, dspeed_moment,
+				first_key.c_str(), last_key.c_str());
+
+			prev_written_keys = written_keys;
+			prev_data_size = data_size;
+			tm.restart();
+		};
 
 		while (true) {
 			rocksdb::Slice key;
@@ -110,8 +152,9 @@ public:
 
 			err = odb.write(&batch);
 			if (err) {
-				ribosome::throw_error(err.code(), "key: %s, could not write batch of %ld elements: %s",
-						key.ToString().c_str(), positions.size(), err.message().c_str());
+				ribosome::throw_error(err.code(), "key: %s, inputs: %s, could not write batch of %ld elements: %s",
+						key.ToString().c_str(), greylock::dump_vector(positions).c_str(),
+						positions.size(), err.message().c_str());
 			}
 
 			if (written_keys == 0) {
@@ -132,30 +175,26 @@ public:
 			}
 
 			if (tm.elapsed() > m_print_interval) {
-				printf("merge: column: %s [%d], written keys: %ld, written data size: %ld, first_key: %s, last_key: %s\n",
-						odb.options().column_names[column].c_str(), column,
-						written_keys, data_size, first_key.c_str(), last_key.c_str());
-				tm.restart();
+				print_stats();
 			}
 		}
 
-		printf("merge: column: %s [%d], written keys: %ld, written data size: %ld, first_key: %s, last_key: %s\n",
-				odb.options().column_names[column].c_str(), column, written_keys, data_size, first_key.c_str(), last_key.c_str());
-
-		long max_seq = 0;
-		for (auto &db: dbs) {
-			auto &m = db->metadata();
-			long seq = m.get_sequence();
-			if (seq > max_seq) {
-				max_seq = seq;
-			}
-		}
-
-		odb.metadata().set_sequence(max_seq);
+		print_stats();
 
 		if (compact) {
+			struct timespec ts;
+
+			clock_gettime(CLOCK_REALTIME, &ts);
+			printf("%s: starting compaction\n", print_time(ts.tv_sec, ts.tv_nsec));
+			tm.restart();
+
 			odb.compact();
+			clock_gettime(CLOCK_REALTIME, &ts);
+			printf("%s: compaction 1 took %.1f seconds\n", print_time(ts.tv_sec, ts.tv_nsec), tm.restart() / 1000.0);
+
 			odb.compact();
+			clock_gettime(CLOCK_REALTIME, &ts);
+			printf("%s: compaction 2 took %.1f seconds\n", print_time(ts.tv_sec, ts.tv_nsec), tm.restart() / 1000.0);
 		}
 	}
 private:
