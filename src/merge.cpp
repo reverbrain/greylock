@@ -175,6 +175,7 @@ public:
 			}
 
 			for (auto it = to_remove.rbegin(); it != to_remove.rend(); ++it) {
+				printf("Input file %s has been processed\n", inputs[*it].c_str());
 				its.erase(its.begin() + (*it));
 			}
 
