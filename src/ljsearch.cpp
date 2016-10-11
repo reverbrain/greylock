@@ -308,7 +308,7 @@ public:
 		doc.mbox = mbox;
 		return ribosome::error_info();
 	}
-#if 0
+
 	ribosome::error_info write_indexes(worker_stats *wstats) {
 		rocksdb::WriteBatch indexes_batch, shards_batch;
 		long indexes_data_size = 0;
@@ -317,19 +317,17 @@ public:
 		greylock::error_info indexes_write_error, shards_write_error;
 
 		// time to create and join a thread is about 1ms on i7
-		std::thread index_thread([&] () {
+		std::thread shards_thread([&] () {
 			for (auto &p: m_token_shards) {
 				std::set<size_t> u(p.second.begin(), p.second.end());
 				greylock::disk_token dt(u);
 				std::string sdt = serialize(dt);
-				indexes_batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdt));
-
-				indexes_data_size += sdt.size();
+				shards_batch.Merge(m_db.cfhandle(greylock::options::token_shards_column), rocksdb::Slice(p.first), rocksdb::Slice(sdt));
+				shards_data_size += sdt.size();
 			}
 
 			m_token_shards.clear();
-
-			indexes_write_error = m_db.write(&indexes_batch);
+			shards_write_error = m_db.write(&shards_batch);
 		});
 
 
@@ -338,15 +336,13 @@ public:
 			greylock::disk_index di;
 			di.ids.insert(di.ids.end(), u.begin(), u.end());
 			std::string sdi = serialize(di);
-			shards_batch.Merge(rocksdb::Slice(p.first), rocksdb::Slice(sdi));
-
-			shards_data_size += sdi.size();
+			indexes_batch.Merge(m_db.cfhandle(greylock::options::indexes_column), rocksdb::Slice(p.first), rocksdb::Slice(sdi));
+			indexes_data_size += sdi.size();
 		}
 
+		indexes_write_error = m_db.write(&indexes_batch);
 
-		shards_write_error = m_db.write(&shards_batch);
-
-		index_thread.join();
+		shards_thread.join();
 
 		if (indexes_write_error) {
 			return ribosome::create_error(indexes_write_error.code(), "could not write indexes batch: %s",
@@ -365,7 +361,7 @@ public:
 		clear();
 		return ribosome::error_info();
 	}
-#endif
+
 	void clear() {
 		m_token_indexes.clear();
 		m_token_shards.clear();
@@ -445,6 +441,7 @@ public:
 	}
 
 	~lj_worker() {
+		write_indexes();
 	}
 
 	void swap(index_cache &dst) {
@@ -452,12 +449,12 @@ public:
 		m_index_cache.swap(dst);
 		m_index_cache.clear();
 	}
-#if 0
+
 	ribosome::error_info write_indexes() {
 		std::lock_guard<std::mutex> guard(m_lock);
 		return m_index_cache.write_indexes(&m_wstats);
 	}
-#endif
+
 	long cached_documents() const {
 		return m_index_cache.cached_documents();
 	}
@@ -502,7 +499,17 @@ public:
 		return convert_to_document(std::move(p));
 	}
 
-	ribosome::error_info process(greylock::document &doc) {
+	ribosome::error_info process(std::vector<greylock::document> &docs) {
+		for (auto &doc: docs) {
+			auto err = process_one_document(doc);
+			if (err)
+				return err;
+		}
+
+		return write_indexes();
+	}
+
+	ribosome::error_info process_one_document(greylock::document &doc) {
 		ribosome::split spl;
 		bool numbers_only = true;
 
@@ -820,10 +827,10 @@ public:
 			t.join();
 		}
 
-		sync_wait_completed();
+		//sync_wait_completed();
 		m_sync_thread.join();
 
-		write_indexes();
+		//write_indexes();
 	}
 
 	void compact() {
@@ -1148,11 +1155,11 @@ private:
 
 			if ((m_sync_state != sync_scheduled) && (status == std::cv_status::no_timeout))
 				continue;
-
+#if 0
 			guard.unlock();
 			write_indexes();
 			guard.lock();
-
+#endif
 			m_sync_state = sync_completed;
 			m_sync_wait.notify_all();
 		}
@@ -1183,7 +1190,7 @@ private:
 				}
 
 				if (worker->cached_documents() > m_cc.index_cached_documents) {
-					sync_wait();
+					//sync_wait();
 				}
 
 				guard.lock();
@@ -1372,7 +1379,7 @@ int main(int argc, char *argv[])
 			return -ENOENT;
 		}
 
-		lj_parser<greylock::document> parser(thread_num, cc);
+		lj_parser<std::vector<greylock::document>> parser(thread_num, cc);
 		auto err = parser.open(output);
 		if (err) {
 			std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
@@ -1428,6 +1435,8 @@ int main(int argc, char *argv[])
 
 		realtm.restart();
 
+		size_t prev_shard_number = 0;
+		std::vector<greylock::document> docs;
 		for (; it->Valid(); it->Next()) {
 			auto sl = it->value();
 
@@ -1442,14 +1451,27 @@ int main(int argc, char *argv[])
 			total_size += doc.ctx.content.size() + doc.ctx.title.size();
 			real_size += doc.ctx.content.size() + doc.ctx.title.size();
 
-			parser.queue_work(std::move(doc));
+			size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
+			if (shard_number > 10000) {
+				printf("shard_number: %ld [%lx], id: %s, doc: %s\n", shard_number, shard_number, doc.indexed_id.to_string().c_str(),
+						doc.id.c_str());
+			}
+			if (docs.empty() || shard_number == prev_shard_number) {
+				docs.emplace_back(doc);
+			} else {
+				parser.queue_work(std::move(docs));
+				docs.clear();
+			}
+
+			prev_shard_number = shard_number;
+
 			if (last_print.elapsed() > print_interval) {
 				printf("%s\n", print_stats(parser.pstats()));
 			}
 		}
 
-		parser.sync_wait_completed();
-		parser.write_indexes();
+		//parser.sync_wait_completed();
+		//parser.write_indexes();
 
 		printf("\n%s\n", print_stats(parser.pstats()));
 
