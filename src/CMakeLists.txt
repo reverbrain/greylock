@@ -27,13 +27,17 @@ add_executable(greylock_meta meta.cpp)
 target_link_libraries(greylock_meta
 	greylock
 )
+add_executable(greylock_check check.cpp)
+target_link_libraries(greylock_check
+	greylock
+)
 
 install(TARGETS	greylock
 	LIBRARY DESTINATION lib${LIB_SUFFIX}
 	ARCHIVE DESTINATION lib${LIB_SUFFIX}
 	BUNDLE DESTINATION library
 )
-install(TARGETS	greylock_server greylock_meta
+install(TARGETS	greylock_server greylock_meta greylock_check
 	RUNTIME DESTINATION bin COMPONENT runtime
 )
 
