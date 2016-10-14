@@ -704,10 +704,12 @@ private:
 		std::string doc_serialized = serialize(doc);
 		// may not be rvalue, otherwise batch will cache stall pointer
 		std::string dkey = doc.indexed_id.to_string();
-		batch.Put(m_db.cfhandle(greylock::options::documents_column), rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
+		batch.Put(m_db.cfhandle(greylock::options::documents_column),
+				rocksdb::Slice(dkey), rocksdb::Slice(doc_serialized));
 
 		std::string doc_indexed_id_serialized = serialize(doc.indexed_id);
-		batch.Put(m_db.cfhandle(greylock::options::document_ids_column), rocksdb::Slice(doc.id), rocksdb::Slice(doc_indexed_id_serialized));
+		batch.Put(m_db.cfhandle(greylock::options::document_ids_column),
+				rocksdb::Slice(doc.id), rocksdb::Slice(doc_indexed_id_serialized));
 
 		auto err = m_db.write(&batch);
 		if (err) {
