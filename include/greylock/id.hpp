@@ -10,7 +10,7 @@
 namespace ioremap { namespace greylock {
 
 namespace {
-	static const uint32_t start_date = 946674000; // 2000-01-01
+	static const uint32_t start_date = 0;
 	static const uint32_t date_div = 3600 * 24;
 }
 
@@ -47,7 +47,7 @@ struct id_t {
 
 	std::string to_string() const {
 		char buf[64];
-		size_t sz = snprintf(buf, sizeof(buf), "%lx", timestamp);
+		size_t sz = snprintf(buf, sizeof(buf), "%016lx", timestamp);
 		return std::string(buf, sz);
 	}
 
