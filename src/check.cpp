@@ -52,50 +52,49 @@ public:
 		}
 
 		size_t prev_shard_number = 0;
+		size_t shard_number = 0;
 		size_t prev_documents = 0;
 		size_t documents = 0;
 
 		ribosome::timer tm, last_print;
+		greylock::document doc;
+
+		auto print_stats = [&] () -> char * {
+			struct timespec ts;
+			clock_gettime(CLOCK_REALTIME, &ts);
+
+			static char tmp[1024];
+
+			snprintf(tmp, sizeof(tmp),
+				"%s: %ld seconds: documents: %ld, speed: %.2f [%.2f] docs/s, shard number: %ld, id: %s, doc: %s",
+				print_time(ts.tv_sec, ts.tv_nsec),
+				tm.elapsed() / 1000,
+				documents,
+				(float)documents * 1000.0 / (float)tm.elapsed(),
+				(float)(documents - prev_documents) * 1000.0 / (float)last_print.elapsed(),
+				shard_number,
+				doc.indexed_id.to_string().c_str(), doc.id.c_str());
+
+			prev_documents = documents;
+			last_print.restart();
+			return tmp;
+		};
 
 		for (; it->Valid(); it->Next()) {
 			auto sl = it->value();
 
-			greylock::document doc;
 			auto gerr = deserialize(doc, sl.data(), sl.size());
 			if (gerr) {
 				ribosome::throw_error(err.code(), "could not deserialize document, key: %s, size: %ld, error: %s [%d]",
 						it->key().ToString().c_str(), sl.size(), gerr.message().c_str(), gerr.code());
 			}
 
-			size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
+			shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
 			if (shard_number > 10000) {
 				printf("shard_number: %ld [%lx], id: %s, doc: %s\n",
 						shard_number, shard_number, doc.indexed_id.to_string().c_str(),
 						doc.id.c_str());
 			}
-
-			auto print_stats = [&] () -> char * {
-				struct timespec ts;
-				clock_gettime(CLOCK_REALTIME, &ts);
-
-				static char tmp[1024];
-
-
-				snprintf(tmp, sizeof(tmp),
-					"%s: %ld seconds: documents: %ld, speed: %.2f [%.2f] docs/s, shard number: %ld, id: %s, doc: %s",
-					print_time(ts.tv_sec, ts.tv_nsec),
-					tm.elapsed() / 1000,
-					documents,
-					(float)documents * 1000.0 / (float)tm.elapsed(),
-					(float)(documents - prev_documents) * 1000.0 / (float)last_print.elapsed(),
-					shard_number,
-					doc.indexed_id.to_string().c_str(), doc.id.c_str());
-
-				prev_documents = documents;
-				last_print.restart();
-				return tmp;
-			};
-
 
 			if (shard_number < prev_shard_number) {
 				printf("shard_number: %ld -> %ld, id: %s, doc: %s, error: shard number decreased\n",
@@ -110,6 +109,7 @@ public:
 			documents++;
 			prev_shard_number = shard_number;
 		}
+		std::cout << print_stats() << std::endl;
 	}
 
 private:
