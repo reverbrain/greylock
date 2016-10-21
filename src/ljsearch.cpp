@@ -277,8 +277,8 @@ public:
 		return ret;
 	}
 
-	void index(greylock::document &doc) {
-		m_docs.emplace_back(std::move(doc));
+	void index(const greylock::document &doc) {
+		m_docs.push_back(doc);
 	}
 
 	ribosome::error_info write_indexes(worker_stats *wstats) {
@@ -344,6 +344,7 @@ public:
 
 	void clear() {
 		m_docs.clear();
+		m_docs.shrink_to_fit();
 
 		m_empty_authors = 0;
 	}
@@ -473,7 +474,10 @@ public:
 	ribosome::error_info process(std::vector<greylock::document> &docs) {
 		ribosome::error_info err;
 
-		for (auto &doc: docs) {
+		std::vector<greylock::document> local;
+		std::swap(local, docs);
+
+		for (auto &doc: local) {
 			err = process_one_document(doc);
 			if (err)
 				return err;
