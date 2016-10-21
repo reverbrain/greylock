@@ -277,7 +277,7 @@ public:
 		return ret;
 	}
 
-	void index(const greylock::document &doc) {
+	void index(greylock::document &&doc) {
 		m_docs.push_back(doc);
 	}
 
@@ -471,14 +471,14 @@ public:
 		return convert_to_document(std::move(p));
 	}
 
-	ribosome::error_info process(std::vector<greylock::document> &docs) {
+	ribosome::error_info process(std::list<greylock::document> &docs) {
 		ribosome::error_info err;
 
-		std::vector<greylock::document> local;
-		std::swap(local, docs);
+		while (docs.size()) {
+			auto doc(std::move(docs.front()));
+			docs.pop_front();
 
-		for (auto &doc: local) {
-			err = process_one_document(doc);
+			err = process_one_document(std::move(doc));
 			if (err)
 				return err;
 		}
@@ -488,6 +488,7 @@ public:
 		m_index_cache.clear();
 		return ribosome::error_info();
 #endif
+
 		if (cached_documents() > m_cc.index_cached_documents) {
 			err = write_indexes();
 		}
@@ -495,7 +496,7 @@ public:
 		return err;
 	}
 
-	ribosome::error_info process_one_document(greylock::document &doc) {
+	ribosome::error_info process_one_document(greylock::document &&doc) {
 		ribosome::split spl;
 
 		auto split_content = [&] (const std::string &content, greylock::attribute *a) {
@@ -588,7 +589,7 @@ public:
 		doc.idx.attributes.emplace_back(fc);
 		doc.idx.attributes.emplace_back(urls);
 
-		m_index_cache.index(doc);
+		m_index_cache.index(std::move(doc));
 
 		std::unique_lock<std::mutex> guard(m_lock);
 		m_wstats.lines++;
@@ -854,7 +855,7 @@ public:
 		std::unique_lock<std::mutex> guard(m_lock);
 		m_lines.emplace_back(std::move(str));
 
-		if (m_lines.size() > m_pool.size() * 2) {
+		if (m_lines.size() > m_pool.size() * 1.3) {
 			m_parser_wait.wait(guard, [&] {return m_lines.size() < m_pool.size();});
 		}
 
@@ -1407,7 +1408,7 @@ int main(int argc, char *argv[])
 			return -ENOENT;
 		}
 
-		lj_parser<std::vector<greylock::document>> parser(thread_num, cc);
+		lj_parser<std::list<greylock::document>> parser(thread_num, cc);
 		auto err = parser.open(output);
 		if (err) {
 			std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
@@ -1464,7 +1465,7 @@ int main(int argc, char *argv[])
 		realtm.restart();
 
 		size_t prev_shard_number = 0;
-		std::vector<greylock::document> docs;
+		std::list<greylock::document> docs;
 		for (; it->Valid(); it->Next()) {
 			auto sl = it->value();
 
@@ -1484,9 +1485,12 @@ int main(int argc, char *argv[])
 				printf("shard_number: %ld [%lx], id: %s, doc: %s\n", shard_number, shard_number, doc.indexed_id.to_string().c_str(),
 						doc.id.c_str());
 			}
+
 			if (docs.empty() || shard_number == prev_shard_number) {
 				docs.emplace_back(doc);
 			} else {
+				printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
+
 				parser.queue_work(std::move(docs));
 				docs.clear();
 			}
