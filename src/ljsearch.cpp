@@ -278,7 +278,7 @@ public:
 	}
 
 	void index(greylock::document &&doc) {
-		m_docs.push_back(doc);
+		m_docs.push_back(std::move(doc));
 	}
 
 	ribosome::error_info write_indexes(worker_stats *wstats) {
@@ -344,7 +344,6 @@ public:
 
 	void clear() {
 		m_docs.clear();
-		m_docs.shrink_to_fit();
 
 		m_empty_authors = 0;
 	}
@@ -358,14 +357,10 @@ public:
 		other.m_empty_authors = tmp;
 	}
 
-	std::vector<greylock::document> &docs() {
-		return m_docs;
-	}
-
 private:
 	greylock::database &m_db;
 
-	std::vector<greylock::document> m_docs;
+	std::list<greylock::document> m_docs;
 
 	long m_empty_authors = 0;
 
@@ -1482,13 +1477,12 @@ int main(int argc, char *argv[])
 
 			size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
 			if (shard_number > 10000) {
-				printf("shard_number: %ld [%lx], id: %s, doc: %s\n", shard_number, shard_number, doc.indexed_id.to_string().c_str(),
-						doc.id.c_str());
+				printf("shard_number: %ld [%lx], id: %s, doc: %s\n",
+						shard_number, shard_number,
+						doc.indexed_id.to_string().c_str(), doc.id.c_str());
 			}
 
-			if (docs.empty() || shard_number == prev_shard_number) {
-				docs.emplace_back(doc);
-			} else {
+			if (docs.size() && (shard_number != prev_shard_number)) {
 				printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
 
 				parser.queue_work(std::move(docs));
@@ -1496,6 +1490,7 @@ int main(int argc, char *argv[])
 			}
 
 			prev_shard_number = shard_number;
+			docs.emplace_back(doc);
 
 			if (last_print.elapsed() > print_interval) {
 				printf("%s\n", print_stats(parser.pstats()));
