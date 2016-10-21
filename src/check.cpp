@@ -74,7 +74,7 @@ public:
 				documents,
 				(float)documents * 1000.0 / (float)tm.elapsed(),
 				(float)(documents - prev_documents) * 1000.0 / (float)last_print.elapsed(),
-				shard_number, shard_documents,
+				prev_shard_number, shard_documents,
 				doc.indexed_id.to_string().c_str(), doc.id.c_str());
 
 			prev_documents = documents;
