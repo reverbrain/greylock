@@ -67,14 +67,14 @@ public:
 			static char tmp[1024];
 
 			snprintf(tmp, sizeof(tmp),
-				"%s: %ld seconds: documents: %ld, per shard: %ld, speed: %.2f [%.2f] docs/s, "
-					"shard number: %ld, id: %s, doc: %s",
+				"%s: %ld seconds: documents: %ld, speed: %.2f [%.2f] docs/s, "
+					"shard: %ld, docs: %ld, id: %s, doc: %s",
 				print_time(ts.tv_sec, ts.tv_nsec),
 				tm.elapsed() / 1000,
-				documents, shard_documents,
+				documents,
 				(float)documents * 1000.0 / (float)tm.elapsed(),
 				(float)(documents - prev_documents) * 1000.0 / (float)last_print.elapsed(),
-				shard_number,
+				shard_number, shard_documents,
 				doc.indexed_id.to_string().c_str(), doc.id.c_str());
 
 			prev_documents = documents;
@@ -104,10 +104,6 @@ public:
 						doc.id.c_str());
 			}
 
-			documents++;
-			shard_documents++;
-
-
 			if ((last_print.elapsed() > m_print_interval) || (prev_shard_number != shard_number)) {
 				std::cout << print_stats() << std::endl;
 			}
@@ -115,6 +111,9 @@ public:
 			if (prev_shard_number != shard_number) {
 				shard_documents = 0;
 			}
+
+			documents++;
+			shard_documents++;
 
 			prev_shard_number = shard_number;
 		}
