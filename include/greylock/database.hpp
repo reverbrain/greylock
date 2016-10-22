@@ -31,7 +31,7 @@
 namespace ioremap { namespace greylock {
 
 struct options {
-	size_t tokens_shard_size = 3600 * 24 * 30;
+	size_t tokens_shard_size = 3600 * 1;
 
 	int max_threads = 8;
 
