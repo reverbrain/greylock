@@ -85,6 +85,157 @@ struct post {
 	}
 };
 
+struct write_work {
+	rocksdb::WriteBatch indexes_batch, shards_batch;
+
+	bool has_work() const {
+		return indexes_batch.Count() + shards_batch.Count() > 0;
+	}
+};
+
+//#define SERIALIZER_DEBUG
+
+class serializer {
+public:
+	serializer(greylock::database &db): m_db(db), m_worker(std::bind(&serializer::write_worker, this)) {
+	}
+
+	~serializer() {
+		m_need_exit = true;
+		m_wait.notify_one();
+		m_worker.join();
+
+		flush_ww(true);
+		m_sync_wait.notify_one();
+	}
+
+	void submit_sequence_number(size_t sn) {
+		std::lock_guard<std::mutex> guard(m_lock);
+		m_works.emplace(sn, std::vector<write_work>());
+	}
+	void remove_sequence_number(size_t sn) {
+#ifdef SERIALIZER_DEBUG
+		printf("ww: remove: shard: %ld\n", sn);
+#endif
+
+		std::lock_guard<std::mutex> guard(m_lock);
+		auto it = m_works.find(sn);
+		if (it != m_works.end()) {
+			if (it->second.empty())
+				m_works.erase(it);
+		}
+	}
+
+	ribosome::error_info submit_work(size_t sn, write_work &&ww) {
+		if (m_werr)
+			return m_werr;
+
+		if (!ww.has_work()) {
+			remove_sequence_number(sn);
+			return m_werr;
+		}
+
+		std::lock_guard<std::mutex> guard(m_lock);
+
+		m_have_work++;
+
+		auto it = m_works.find(sn);
+		if (it == m_works.end()) {
+			m_works.emplace(sn, std::vector<write_work>({std::move(ww)}));
+		} else {
+			// we already accounted that shard number
+			if (it->second.size())
+				m_have_work--;
+
+			it->second.push_back(std::move(ww));
+		}
+#ifdef SERIALIZER_DEBUG
+		printf("ww: submit: shard: %ld, indexes: %d, shards: %d, work: %ld\n",
+				sn, ww.indexes_batch.Count(), ww.shards_batch.Count(), m_have_work);
+#endif
+		m_wait.notify_one();
+		return m_werr;
+	}
+
+	ribosome::error_info sync() {
+		return sync(0);
+	}
+
+	ribosome::error_info sync(int num) {
+		std::unique_lock<std::mutex> guard(m_lock);
+		m_wait.notify_one();
+		m_sync_wait.wait(guard, [&] () {return m_have_work <= num;});
+
+		return m_werr;
+	}
+
+private:
+	greylock::database &m_db;
+
+	std::mutex m_lock;
+	std::map<size_t, std::vector<write_work>> m_works;
+	long m_have_work = 0;
+
+	ribosome::error_info m_werr;
+
+	std::condition_variable m_wait;
+	std::condition_variable m_sync_wait;
+	bool m_need_exit = false;
+
+	std::thread m_worker;
+
+	void write_worker() {
+		while (!m_need_exit) {
+			std::unique_lock<std::mutex> guard(m_lock);
+			m_wait.wait(guard);
+			guard.unlock();
+
+			flush_ww(false);
+		}
+	}
+
+	void flush_ww(bool force) {
+		while (m_works.size()) {
+			std::unique_lock<std::mutex> guard(m_lock);
+			auto it = m_works.begin();
+			//printf("ww: check: shard: %ld, indexes: %d, shards: %d\n", it->first, it->second.indexes_batch.Count(), it->second.shards_batch.Count());
+			if (it->second.empty() && !force)
+				return;
+
+			auto wws(std::move(it->second));
+			size_t sn = it->first;
+			m_works.erase(it);
+
+			if (wws.size())
+				m_have_work--;
+			guard.unlock();
+
+			for (auto &ww: wws) {
+				auto err = m_db.write(&ww.indexes_batch);
+				if (err) {
+					m_werr = ribosome::create_error(err.code(), "could not write indexes batch of %d elements: %s",
+							ww.indexes_batch.Count(), err.message().c_str());
+					fprintf(stderr, "serializer: %s [%d]\n", m_werr.message().c_str(), m_werr.code());
+					return;
+				}
+
+				err = m_db.write(&ww.shards_batch);
+				if (err) {
+					m_werr = ribosome::create_error(err.code(), "could not write shards batch of %d elements: %s",
+							ww.shards_batch.Count(), err.message().c_str());
+					fprintf(stderr, "serializer: %s [%d]\n", m_werr.message().c_str(), m_werr.code());
+					return;
+				}
+#ifdef SERIALIZER_DEBUG
+				printf("ww: write: shard: %ld, indexes: %d, shards: %d, work: %ld\n",
+						sn, ww.indexes_batch.Count(), ww.shards_batch.Count(), m_have_work);
+#endif
+				m_sync_wait.notify_one();
+			}
+		}
+	}
+};
+
 template <typename T>
 struct use_control {
 	T word;
@@ -239,7 +390,7 @@ public:
 	typedef std::map<std::string, greylock::disk_index> token_indexes_t;
 	typedef std::map<std::string, greylock::disk_token> token_shards_t;
 
-	index_cache(greylock::database &db) : m_db(db) {}
+	index_cache(greylock::database &db, serializer &ser) : m_db(db), m_serializer(ser) {}
 
 	long cached_documents() const {
 		return m_docs.size();
@@ -285,17 +436,20 @@ public:
 		if (m_docs.empty())
 			return ribosome::error_info();
 
-		rocksdb::WriteBatch indexes_batch, shards_batch;
+		write_work ww;
+
 		long indexes_data_size = 0;
 		long shards_data_size = 0;
-
-		greylock::error_info indexes_write_error, shards_write_error;
-
 
 		token_indexes_t token_indexes;
 		token_shards_t token_shards;
 
+		std::vector<size_t> sns;
 		for (auto &doc: m_docs) {
+			size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
+			if (sns.empty() || shard_number != sns.back())
+				sns.push_back(shard_number);
+
 			generate_indexes(doc, token_indexes, token_shards);
 		}
 
@@ -303,35 +457,30 @@ public:
 		std::thread shards_thread([&] () {
 			for (auto &p: token_shards) {
 				std::string sdt = serialize(p.second);
-				shards_batch.Merge(m_db.cfhandle(greylock::options::token_shards_column),
+				ww.shards_batch.Merge(m_db.cfhandle(greylock::options::token_shards_column),
 						rocksdb::Slice(p.first), rocksdb::Slice(sdt));
 				shards_data_size += sdt.size();
 			}
 
 			token_shards.clear();
-			shards_write_error = m_db.write(&shards_batch);
 		});
 
 
 		for (auto &p: token_indexes) {
 			std::string sdi = serialize(p.second);
-			indexes_batch.Merge(m_db.cfhandle(greylock::options::indexes_column),
+			ww.indexes_batch.Merge(m_db.cfhandle(greylock::options::indexes_column),
 					rocksdb::Slice(p.first), rocksdb::Slice(sdi));
 			indexes_data_size += sdi.size();
 		}
 
-		indexes_write_error = m_db.write(&indexes_batch);
-
 		shards_thread.join();
 
-		if (indexes_write_error) {
-			return ribosome::create_error(indexes_write_error.code(), "could not write indexes batch: %s",
-					indexes_write_error.message().c_str());
-		}
+		auto err = m_serializer.submit_work(sns[0], std::move(ww));
+		if (err)
+			return err;
 
-		if (shards_write_error) {
-			return ribosome::create_error(shards_write_error.code(), "could not write shards batch: %s",
-					shards_write_error.message().c_str());
+		for (size_t idx = 1; idx < sns.size(); ++idx) {
+			m_serializer.remove_sequence_number(sns[idx]);
 		}
 
 		wstats->documents += m_docs.size();
@@ -359,6 +508,7 @@ public:
 
 private:
 	greylock::database &m_db;
+	serializer &m_serializer;
 
 	std::list<greylock::document> m_docs;
 
@@ -400,10 +550,11 @@ private:
 
 class lj_worker {
 public:
-	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc):
+	lj_worker(greylock::database &db, warp::language_checker &lch, const cache_control &cc, serializer &ser):
 		m_db(db), m_lch(lch), m_cc(cc),
 		m_word_cache(cc.word_cache_size),
-		m_index_cache(db)
+		m_serializer(ser),
+		m_index_cache(db, ser)
 	{
 	}
 
@@ -486,6 +637,7 @@ public:
 
 		if (cached_documents() > m_cc.index_cached_documents) {
 			err = write_indexes();
+			m_serializer.sync(4);
 		}
 
 		return err;
@@ -563,7 +715,6 @@ public:
 
 		if (ft.tokens.empty() && fc.tokens.empty()) {
 			m_wstats.skipped_documents++;
-			return ribosome::error_info();
 		}
 
 		for (auto &url: doc.ctx.links) {
@@ -604,6 +755,8 @@ private:
 	cache_control m_cc;
 
 	word_cache<std::string, std::string> m_word_cache;
+
+	serializer &m_serializer;
 
 	ribosome::html_parser m_html;
 	warp::stemmer m_stemmer;
@@ -787,13 +940,13 @@ struct parse_stats {
 template <typename ET = std::string>
 class lj_parser {
 public:
-	lj_parser(int n, const struct cache_control &cc) : m_cc(cc) {
+	lj_parser(int n, const struct cache_control &cc) : m_cc(cc), m_serializer(m_db) {
 		m_pool.reserve(n);
 		m_workers.reserve(n);
 
 		for (int i = 0; i < n; ++i) {
 			m_pool.emplace_back(std::bind(&lj_parser::callback, this, i));
-			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cc)));
+			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cc, m_serializer)));
 		}
 
 		m_sync_thread = std::thread(std::bind(&lj_parser::sync_callback, this));
@@ -850,7 +1003,7 @@ public:
 		std::unique_lock<std::mutex> guard(m_lock);
 		m_lines.emplace_back(std::move(str));
 
-		if (m_lines.size() > m_pool.size() * 1.3) {
+		if (m_lines.size() > m_pool.size() * 2) {
 			m_parser_wait.wait(guard, [&] {return m_lines.size() < m_pool.size();});
 		}
 
@@ -1126,12 +1279,19 @@ public:
 
 			m_parser_wait.wait(guard);
 		}
+
+		m_serializer.sync();
+	}
+
+	void submit_sequence_number(size_t sn) {
+		m_serializer.submit_sequence_number(sn);
 	}
 
 private:
 	greylock::database m_db;
 	warp::language_checker m_lch;
 	cache_control m_cc;
+	serializer m_serializer;
 
 	std::vector<std::unique_ptr<lj_worker>> m_workers;
 
@@ -1205,8 +1365,6 @@ private:
 			}
 		}
 	}
-
-
 
 	void callback(int idx) {
 		while (!m_need_exit) {
@@ -1485,6 +1643,7 @@ int main(int argc, char *argv[])
 			if (docs.size() && (shard_number != prev_shard_number)) {
 				printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
 
+				parser.submit_sequence_number(prev_shard_number);
 				parser.queue_work(std::move(docs));
 				docs.clear();
 			}
