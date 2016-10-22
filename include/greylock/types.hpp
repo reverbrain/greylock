@@ -302,7 +302,7 @@ struct document {
 
 	static std::string generate_index_key_shard_number(const std::string &base, size_t sn) {
 		char ckey[base.size() + 17];
-		size_t csize = snprintf(ckey, sizeof(ckey), "%s.%ld", base.c_str(), sn);
+		size_t csize = snprintf(ckey, sizeof(ckey), "%016lx.%s", sn, base.c_str());
 
 		return std::string(ckey, csize);
 	}
