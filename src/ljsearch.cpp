@@ -111,7 +111,10 @@ public:
 
 	void submit_sequence_number(size_t sn) {
 		std::lock_guard<std::mutex> guard(m_lock);
-		m_works.emplace(sn, std::vector<write_work>());
+		auto it = m_works.find(sn);
+		if (it == m_works.end()) {
+			m_works.emplace(sn, std::vector<write_work>());
+		}
 	}
 	void remove_sequence_number(size_t sn) {
 #ifdef SERIALIZER_DEBUG
@@ -203,7 +206,9 @@ private:
 				return;
 
 			auto wws(std::move(it->second));
+#ifdef SERIALIZER_DEBUG
 			size_t sn = it->first;
+#endif
 			m_works.erase(it);
 
 			if (wws.size())
@@ -1393,6 +1398,7 @@ int main(int argc, char *argv[])
 	std::string rewind_doc;
 	cache_control cc;
 	long print_interval;
+	size_t shard_chunk_size = 10000;
 	generic.add_options()
 		("help", "This help message")
 		("input", bpo::value<std::vector<std::string>>(&inputs)->composing(), "Livejournal dump files packed with bzip2")
@@ -1409,6 +1415,8 @@ int main(int argc, char *argv[])
 			"Per-thread index cache flush interval in seconds")
 		("index-cached-documents", bpo::value<long>(&cc.index_cached_documents)->default_value(1000),
 			"Maximum number of documents parsed and cached per thread")
+		("index-shard-chunk-size", bpo::value<size_t>(&shard_chunk_size)->default_value(10000),
+			"Maximum number of documents in the shard chunk")
 		("lang_stats", bpo::value<std::string>(&lang_path), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
 			"Language models, format: language:model_path")
@@ -1634,14 +1642,16 @@ int main(int argc, char *argv[])
 			real_size += doc.ctx.content.size() + doc.ctx.title.size();
 
 			size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
-			if (shard_number > 10000) {
+			if (shard_number > 0xffffffff) {
 				printf("shard_number: %ld [%lx], id: %s, doc: %s\n",
 						shard_number, shard_number,
 						doc.indexed_id.to_string().c_str(), doc.id.c_str());
 			}
 
-			if (docs.size() && (shard_number != prev_shard_number)) {
-				printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
+			if ((docs.size() && (shard_number != prev_shard_number)) || docs.size() == shard_chunk_size) {
+				if (shard_number != prev_shard_number) {
+					//printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
+				}
 
 				parser.submit_sequence_number(prev_shard_number);
 				parser.queue_work(std::move(docs));
