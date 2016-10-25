@@ -53,7 +53,11 @@ struct options {
 		documents_column,
 		document_ids_column,
 		token_shards_column,
-		indexes_column,
+		indexes_post_column,
+		indexes_author_post_column,
+		indexes_comment_column,
+		indexes_author_comment_column,
+		indexes_journal_comment_column,
 		meta_column,
 		__column_size,
 	};
@@ -67,8 +71,37 @@ struct options {
 		column_names[documents_column] = "documents";
 		column_names[document_ids_column] = "document_ids";
 		column_names[token_shards_column] = "token_shards";
-		column_names[indexes_column] = "indexes";
+		column_names[indexes_post_column] = "indexes_post";
+		column_names[indexes_author_post_column] = "indexes_author_post";
+		column_names[indexes_comment_column] = "indexes_comment";
+		column_names[indexes_author_comment_column] = "indexes_author_comment";
+		column_names[indexes_journal_comment_column] = "indexes_journal_comment";
 		column_names[meta_column] = "meta";
+	}
+
+	std::string column_name(int i) const {
+		if (i < 0 || i >= __column_size) {
+			return "";
+		}
+
+		return column_names[i];
+	}
+
+	int get_column(const std::string &name) const {
+		auto it = std::find(column_names.begin(), column_names.end(), name);
+		if (it == column_names.end())
+			return -1;
+
+		return std::distance(column_names.begin(), it);
+	}
+
+	int get_column_from_prefix(const std::string &prefix) const {
+		auto pos = prefix.find('.');
+		if (pos == std::string::npos) {
+			return get_column(prefix);
+		}
+
+		return get_column(prefix.substr(0, pos));
 	}
 };
 
@@ -456,13 +489,13 @@ public:
 	}
 
 	greylock::error_info open_read_only(const std::string &path) {
-		return open(path, true);
+		return open(path, true, false);
 	}
 	greylock::error_info open_read_write(const std::string &path) {
-		return open(path, false);
+		return open(path, false, false);
 	}
 
-	greylock::error_info open(const std::string &path, bool ro) {
+	greylock::error_info open(const std::string &path, bool ro, bool old) {
 		if (m_db) {
 			return greylock::create_error(-EINVAL, "database is already opened");
 		}
@@ -505,21 +538,42 @@ public:
 		rocksdb::Status s;
 
 		rocksdb::ColumnFamilyOptions cfo(dbo);
-
 		std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
-		for (size_t i = 0; i < options().column_names.size(); ++i) {
-			auto cname = options().column_names[i];
 
-			cfo.merge_operator.reset();
+		int meta_column = options::meta_column;
+		if (old) {
+			meta_column = 5;
 
-			if (i == greylock::options::token_shards_column) {
-				cfo.merge_operator.reset(new token_shards_merge_operator);
+			std::vector<std::string> cnames({rocksdb::kDefaultColumnFamilyName, "documents", "document_ids", "token_shards", "indexes", "meta"});
+			for (size_t i = 0; i < cnames.size(); ++i) {
+				auto cname = cnames[i];
+
+				cfo.merge_operator.reset();
+
+				if (i == greylock::options::token_shards_column) {
+					cfo.merge_operator.reset(new token_shards_merge_operator);
+				}
+				if (i == greylock::options::token_shards_column + 1) {
+					cfo.merge_operator.reset(new indexes_merge_operator);
+				}
+
+				column_families.push_back(rocksdb::ColumnFamilyDescriptor(cname, cfo));
 			}
-			if (i == greylock::options::indexes_column) {
-				cfo.merge_operator.reset(new indexes_merge_operator);
-			}
+		} else {
+			for (size_t i = 0; i < options().column_names.size(); ++i) {
+				auto cname = options().column_names[i];
 
-			column_families.push_back(rocksdb::ColumnFamilyDescriptor(cname, cfo));
+				cfo.merge_operator.reset();
+
+				if (i == greylock::options::token_shards_column) {
+					cfo.merge_operator.reset(new token_shards_merge_operator);
+				}
+				if (i >= greylock::options::indexes_post_column && i <= greylock::options::indexes_journal_comment_column) {
+					cfo.merge_operator.reset(new indexes_merge_operator);
+				}
+
+				column_families.push_back(rocksdb::ColumnFamilyDescriptor(cname, cfo));
+			}
 		}
 
 		if (ro) {
@@ -535,7 +589,7 @@ public:
 		m_ro = ro;
 
 		std::string meta;
-		s = m_db->Get(rocksdb::ReadOptions(), m_handles[options::meta_column], rocksdb::Slice(m_opts.metadata_key), &meta);
+		s = m_db->Get(rocksdb::ReadOptions(), m_handles[meta_column], rocksdb::Slice(m_opts.metadata_key), &meta);
 		if (!s.ok() && !s.IsNotFound()) {
 			return greylock::create_error(-s.code(), "could not read key: %s, error: %s",
 					m_opts.metadata_key.c_str(), s.ToString().c_str());

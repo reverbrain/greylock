@@ -404,27 +404,40 @@ public:
 		return m_empty_authors;
 	}
 
-	std::vector<std::string> mboxes(const greylock::document &doc) {
-		std::vector<std::string> ret;
+	struct mbox {
+		std::string name;
+		int column;
+
+		mbox(const std::string &n, int c): name(n), column(c) {}
+	};
+
+	std::vector<mbox> mboxes(const greylock::document &doc) {
+		std::vector<mbox> ret;
 
 		if (doc.is_comment) {
-			ret.emplace_back("comment");
+			ret.emplace_back(m_db.options().column_name(greylock::options::indexes_comment_column),
+					greylock::options::indexes_comment_column);
 
 			size_t pos = doc.id.rfind('?');
 			pos = doc.id.rfind('/', pos);
 			if (pos != 0) {
 				std::string journal = doc.id.substr(0, pos);
-				ret.emplace_back("journal." + journal + ".comment");
+				std::string prefix = m_db.options().column_name(greylock::options::indexes_journal_comment_column);
+
+				ret.emplace_back(prefix + "." + journal, greylock::options::indexes_journal_comment_column);
 			}
 
 			if (doc.author.size()) {
-				ret.emplace_back("author." + doc.author + ".comment");
+				std::string prefix = m_db.options().column_name(greylock::options::indexes_author_comment_column);
+				ret.emplace_back(prefix + "." + doc.author, greylock::options::indexes_author_comment_column);
 			}
 		} else {
-			ret.emplace_back("post");
+			ret.emplace_back(m_db.options().column_name(greylock::options::indexes_post_column),
+					greylock::options::indexes_post_column);
 
 			if (doc.author.size()) {
-				ret.emplace_back("journal." + doc.author + ".post");
+				std::string prefix = m_db.options().column_name(greylock::options::indexes_author_post_column);
+				ret.emplace_back(prefix + "." + doc.author, greylock::options::indexes_author_post_column);
 			} else {
 				m_empty_authors++;
 			}
@@ -446,7 +459,7 @@ public:
 		long indexes_data_size = 0;
 		long shards_data_size = 0;
 
-		token_indexes_t token_indexes;
+		std::map<int, token_indexes_t> token_indexes;
 		token_shards_t token_shards;
 
 		std::vector<size_t> sns;
@@ -460,22 +473,24 @@ public:
 
 		// time to create and join a thread is about 1ms on i7
 		std::thread shards_thread([&] () {
-			for (auto &p: token_shards) {
-				std::string sdt = serialize(p.second);
+			for (auto &s: token_shards) {
+				std::string sdt = serialize(s.second);
 				ww.shards_batch.Merge(m_db.cfhandle(greylock::options::token_shards_column),
-						rocksdb::Slice(p.first), rocksdb::Slice(sdt));
+						rocksdb::Slice(s.first), rocksdb::Slice(sdt));
 				shards_data_size += sdt.size();
 			}
-
-			token_shards.clear();
 		});
 
 
 		for (auto &p: token_indexes) {
-			std::string sdi = serialize(p.second);
-			ww.indexes_batch.Merge(m_db.cfhandle(greylock::options::indexes_column),
-					rocksdb::Slice(p.first), rocksdb::Slice(sdi));
-			indexes_data_size += sdi.size();
+			int column = p.first;
+
+			for (auto &s: p.second) {
+				std::string sdi = serialize(s.second);
+				ww.indexes_batch.Merge(m_db.cfhandle(column),
+						rocksdb::Slice(s.first), rocksdb::Slice(sdi));
+				indexes_data_size += sdi.size();
+			}
 		}
 
 		shards_thread.join();
@@ -519,14 +534,22 @@ private:
 
 	long m_empty_authors = 0;
 
-	void generate_indexes(greylock::document &doc, token_indexes_t &ti, token_shards_t &ts) {
+	void generate_indexes(greylock::document &doc, std::map<int, token_indexes_t> &tis, token_shards_t &ts) {
 		greylock::document_for_index did;
 		did.indexed_id = doc.indexed_id;
 
 		auto mboxes = this->mboxes(doc);
 		for (auto &mbox: mboxes) {
-			doc.mbox = mbox;
+			doc.mbox = mbox.name;
 			doc.generate_token_keys(m_db.options());
+
+			auto cti = tis.find(mbox.column);
+			if (cti == tis.end()) {
+				auto p = tis.emplace(mbox.column, token_indexes_t());
+				cti = p.first;
+			}
+
+			token_indexes_t &ti(cti->second);
 
 			for (auto &attr: doc.idx.attributes) {
 				for (auto &t: attr.tokens) {
@@ -990,6 +1013,14 @@ public:
 
 	ribosome::error_info open_read_only(const std::string &dbpath) {
 		auto err = m_db.open_read_only(dbpath);
+		if (err)
+			return ribosome::create_error(err.code(), "%s", err.message().c_str());
+
+		return ribosome::error_info();
+	}
+
+	ribosome::error_info open_read_only_old(const std::string &dbpath) {
+		auto err = m_db.open(dbpath, true, true);
 		if (err)
 			return ribosome::create_error(err.code(), "%s", err.message().c_str());
 
@@ -1577,7 +1608,7 @@ int main(int argc, char *argv[])
 		}
 
 		greylock::database idb;
-		auto gerr = idb.open_read_only(indexdb);
+		auto gerr = idb.open(indexdb, true, true);
 		if (gerr) {
 			std::cerr << "could not open in read-only mode input rocksdb database: " << gerr.message() << std::endl;
 			return gerr.code();

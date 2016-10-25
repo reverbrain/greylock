@@ -263,15 +263,14 @@ public:
 					return;
 				}
 
-				greylock::mailbox_query q(server()->db_indexes().options(), it->value);
+				std::string mbox(it->name.GetString(), it->name.GetStringLength());
+				greylock::mailbox_query q(server()->db_indexes().options(), mbox, it->value);
 				if (q.parse_error) {
 					send_error(swarm::http_response::bad_request, q.parse_error.code(),
 							"search: could not parse mailbox query: %s",
 								q.parse_error.message().c_str());
 					return;
 				}
-
-				q.mbox.assign(it->name.GetString(), it->name.GetStringLength());
 
 				iq.se.emplace_back(std::move(q));
 			}
@@ -616,7 +615,7 @@ private:
 		}
 		bool ro = greylock::get_bool(config, "read_only", false);
 
-		auto err = db->open(path, ro);
+		auto err = db->open(path, ro, false);
 		if (err) {
 			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;

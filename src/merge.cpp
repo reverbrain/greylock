@@ -146,7 +146,9 @@ public:
 			for (auto pos: positions) {
 				auto &it = its[pos];
 
-				if ((column == greylock::options::token_shards_column) || (column == greylock::options::indexes_column)) {
+				if ((column == greylock::options::token_shards_column) || 
+					(column >= greylock::options::indexes_post_column &&
+					  column <= greylock::options::indexes_journal_comment_column)) {
 					batch.Merge(odb.cfhandle(column), key, it->value());
 				} else {
 					batch.Put(odb.cfhandle(column), key, it->value());
