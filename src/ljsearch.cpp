@@ -953,8 +953,6 @@ public:
 			m_pool.emplace_back(std::bind(&lj_parser::callback, this, i));
 			m_workers.emplace_back(std::unique_ptr<lj_worker>(new lj_worker(m_db, m_lch, cc, m_serializer)));
 		}
-
-		m_sync_thread = std::thread(std::bind(&lj_parser::sync_callback, this));
 	}
 
 	~lj_parser() {
@@ -963,14 +961,6 @@ public:
 		for (auto &t: m_pool) {
 			t.join();
 		}
-
-		//sync_wait_completed();
-
-		std::unique_lock<std::mutex> guard(m_sync_lock);
-		if (m_sync_state != sync_exited)
-			m_sync_wait.notify_one();
-		guard.unlock();
-		m_sync_thread.join();
 
 		write_indexes();
 		process_jobs(0);
@@ -1093,158 +1083,9 @@ public:
 			batch->Merge(m_db.cfhandle(column), rocksdb::Slice(name), rocksdb::Slice(sdata));
 		}
 	}
-#if 0
+
 	greylock::error_info write_indexes() {
-		ribosome::timer total_tm, tmp_tm;
-		struct timespec start;
-		clock_gettime(CLOCK_REALTIME, &start);
-
-
-		std::list<std::unique_ptr<index_cache>> indexes;
-		long documents = 0;
-		long empty_authors = 0;
-
-		// protect against write_indexes() running in parallel from sync thread and called directly
-		std::unique_lock<std::mutex> guard(m_sync_lock);
-		for (auto &w: m_workers) {
-			std::unique_ptr<index_cache> idx(new index_cache(m_db));
-			w->swap(*idx);
-
-			documents += idx->cached_documents();
-			empty_authors += idx->cached_empty_authors();
-
-			indexes.emplace_back(std::move(idx));
-		}
-
-		m_sync_state = sync_swapped_caches;
-		m_sync_wait.notify_all();
-		guard.unlock();
-
-		if (documents == 0)
-			return greylock::error_info();
-
-		long swap_time = tmp_tm.restart();
-
-		std::vector<iter<index_cache::token_indexes_t>> idx_iter;
-		std::vector<iter<index_cache::token_shards_t>> shard_iter;
-		for (auto &idx: indexes) {
-			idx_iter.emplace_back(idx->token_indexes());
-			shard_iter.emplace_back(idx->token_shards());
-		}
-
-		greylock::id_t last_document;
-
-		long indexes_num = 0;
-		long shards_num = 0;
-		long indexes_data_size = 0;
-		long shards_data_size = 0;
-
-		long token_shards_iter_time = 0;
-		long token_indexes_iter_time = 0;
-
-		long indexes_write_time = 0;
-		long shards_write_time = 0;
-
-		long indexes_sets = 0;
-		long shards_sets = 0;
-
-		rocksdb::WriteBatch index_batch, shards_batch;
-		greylock::error_info indexes_write_error, shards_write_error;
-
-		// time to create and join a thread is about 1ms on i7
-		std::thread index_thread([&] () {
-			iterate<index_cache::token_indexes_t, std::set<greylock::document_for_index>>(idx_iter,
-					greylock::options::indexes_column, &index_batch,
-				[&] (const std::set<greylock::document_for_index> &c) {
-					indexes_num += c.size();
-					indexes_sets += 1;
-
-					greylock::disk_index di;
-					di.ids.insert(di.ids.end(), c.begin(), c.end());
-
-					if (di.ids.back().indexed_id > last_document) {
-						last_document = di.ids.back().indexed_id;
-					}
-					std::string ret = serialize(di);
-					indexes_data_size += ret.size();
-					return ret;
-				});
-
-
-			idx_iter.clear();
-			idx_iter.shrink_to_fit();
-			token_indexes_iter_time = tmp_tm.elapsed();
-
-			indexes_write_error = m_db.write(&index_batch);
-		});
-
-		iterate<index_cache::token_shards_t, std::set<size_t>>(shard_iter,
-					greylock::options::token_shards_column, &shards_batch,
-				[&] (const std::set<size_t> &c) {
-					shards_num += c.size();
-					shards_sets += 1;
-					greylock::disk_token dt(c);
-					std::string ret = serialize(dt);
-					shards_data_size += ret.size();
-					return ret;
-				});
-
-
-		shard_iter.clear();
-		shard_iter.shrink_to_fit();
-		token_shards_iter_time = tmp_tm.elapsed();
-
-		shards_write_error = m_db.write(&shards_batch);
-		shards_write_time = tmp_tm.elapsed() - token_shards_iter_time;
-
-		index_thread.join();
-		indexes_write_time = tmp_tm.restart() - token_indexes_iter_time;
-
-
-		indexes.clear();
-		long indexes_clear_time = tmp_tm.restart();
-
-		if (indexes_num || shards_num) {
-			if (indexes_write_error || shards_write_error) {
-				int code;
-				if (indexes_write_error) {
-					code = indexes_write_error.code();
-				} else {
-					code = shards_write_error.code();
-				}
-
-				return greylock::create_error(code, "could not write indexes: "
-						"indexes batch error: %s [%d], shards batch error: %s [%d]",
-						indexes_write_error.message().c_str(), indexes_write_error.code(),
-						shards_write_error.message().c_str(), shards_write_error.code());
-			}
-
-			// protect against write_indexes() running in parallel from sync thread and called directly
-			guard.lock();
-			m_icache_wstats.documents += documents;
-			m_icache_wstats.empty_authors += empty_authors;
-			m_icache_wstats.written_data_size += indexes_data_size + shards_data_size;
-			guard.unlock();
-
-			printf("write_indexes: started: %s, workers: %ld, documents: %ld/%ld, swap: %ld, "
-				"indexes: %ld, size: %ld, sets: %ld, mean per index: %.1f, iteration: %ld, "
-				"shards: %ld, size: %ld, sets: %ld, mean per shard: %.1f iteration: %ld, "
-				"indexes_clear: %ld, db_write: indexes: %ld, shards: %ld, total_time: %ld, "
-				"last_document: %s\n",
-				print_time(start.tv_sec, start.tv_nsec),
-				m_workers.size(), documents, m_icache_wstats.documents, swap_time,
-				indexes_num, indexes_data_size, indexes_sets, (float)indexes_num / (float)indexes_sets,
-					token_indexes_iter_time,
-				shards_num, shards_data_size, indexes_sets, (float)shards_num / (float)shards_sets, token_shards_iter_time,
-				indexes_clear_time, indexes_write_time, shards_write_time, total_tm.elapsed(),
-				last_document.to_string().c_str());
-		}
-
-		return greylock::error_info();
-	}
-#else
-	greylock::error_info write_indexes() {
-		// protect against write_indexes() running in parallel from sync thread and called directly
+		// protect against write_indexes() running in parallel
 		std::unique_lock<std::mutex> guard(m_sync_lock);
 		for (auto &w: m_workers) {
 			auto err = w->write_indexes();
@@ -1254,27 +1095,6 @@ public:
 		}
 
 		return greylock::error_info();
-	}
-
-#endif
-	void sync_wait() {
-		std::unique_lock<std::mutex> guard(m_sync_lock);
-		if (m_sync_state == sync_exited)
-			return;
-
-		m_sync_state = sync_scheduled;
-		m_sync_wait.notify_one();
-		m_sync_wait.wait(guard, [&] () { return m_sync_state != sync_scheduled; });
-	}
-
-	void sync_wait_completed() {
-		std::unique_lock<std::mutex> guard(m_sync_lock);
-		if (m_sync_state == sync_exited)
-			return;
-
-		m_sync_state = sync_scheduled;
-		m_sync_wait.notify_one();
-		m_sync_wait.wait(guard, [&] () { return m_sync_state == sync_scheduled || m_sync_state == sync_exited; });
 	}
 
 	void sync() {
@@ -1309,37 +1129,6 @@ private:
 	worker_stats m_icache_wstats;
 
 	std::mutex m_sync_lock;
-	std::condition_variable m_sync_wait;
-	std::thread m_sync_thread;
-	enum {
-		sync_not_started = 0,
-		sync_scheduled,
-		sync_swapped_caches,
-		sync_completed,
-		sync_exited,
-	} m_sync_state = sync_not_started;
-
-
-	void sync_callback() {
-		while (!m_need_exit) {
-			std::unique_lock<std::mutex> guard(m_sync_lock);
-			auto status = m_sync_wait.wait_for(guard, std::chrono::seconds(m_cc.index_cache_sync_interval));
-
-			if ((m_sync_state != sync_scheduled) && (status == std::cv_status::no_timeout))
-				continue;
-#if 0
-			guard.unlock();
-			write_indexes();
-			guard.lock();
-#endif
-			m_sync_state = sync_completed;
-			m_sync_wait.notify_all();
-		}
-
-		std::unique_lock<std::mutex> guard(m_sync_lock);
-		m_sync_state = sync_exited;
-		m_sync_wait.notify_all();
-	}
 
 	void process_jobs(int idx) {
 		if (idx >= (int)m_workers.size())
@@ -1363,10 +1152,6 @@ private:
 			if (err) {
 				std::cerr << "could not process line: " << err.message() << std::endl;
 				exit(err.code());
-			}
-
-			if (worker->cached_documents() > m_cc.index_cached_documents) {
-				//sync_wait();
 			}
 		}
 	}
