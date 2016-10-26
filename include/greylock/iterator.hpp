@@ -33,12 +33,7 @@ public:
 			return end(db, index_base);
 		}
 
-		int column = db.options().get_column(mbox);
-		if (column < 0) {
-			return end(db, index_base);
-		}
-
-		return index_iterator(db, column, index_base, shards);
+		return index_iterator(db, index_base, shards);
 	}
 	static index_iterator begin(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token,
 			const std::vector<size_t> &shards) {
@@ -47,25 +42,18 @@ public:
 			return end(db, index_base);
 		}
 
-		int column = db.options().get_column(mbox);
-		if (column < 0) {
-			return end(db, index_base);
-		}
-
-		return index_iterator(db, column, index_base, shards);
+		return index_iterator(db, index_base, shards);
 	}
 
 	static index_iterator end(DBT &db, const std::string &base) {
-		return index_iterator(db, -1, base);
+		return index_iterator(db, base);
 	}
 	static index_iterator end(DBT &db, const std::string &mbox, const std::string &attr, const std::string &token) {
 		std::string index_base = document::generate_index_base(db.options(), mbox, attr, token);
-		return index_iterator(db, -1, index_base);
+		return index_iterator(db, index_base);
 	}
 
 	index_iterator(const index_iterator &src): m_db(src.m_db) {
-		m_column = src.m_column;
-
 		m_current = src.m_current;
 		if (src.m_idx_current == src.m_idx_end) {
 			m_idx_current = m_idx_end = m_current.ids.end();
@@ -190,16 +178,14 @@ public:
 
 private:
 	DBT &m_db;
-	int m_column = -1;
 	std::string m_base;
 	std::vector<size_t> m_shards;
 	int m_shards_idx = -1;
 
-	index_iterator(DBT &db, int column, const std::string &base): m_db(db), m_column(column), m_base(base) {
+	index_iterator(DBT &db, const std::string &base): m_db(db), m_base(base) {
 	}
 
-	index_iterator(DBT &db, int column, const std::string &base, const std::vector<size_t> shards):
-			m_db(db), m_column(column), m_base(base), m_shards(shards) {
+	index_iterator(DBT &db, const std::string &base, const std::vector<size_t> shards): m_db(db), m_base(base), m_shards(shards) {
 		set_shard_index(0);
 		load_next();
 	}
@@ -234,7 +220,7 @@ private:
 
 		std::string key = document::generate_index_key_shard_number(m_base, m_shards[m_shards_idx]);
 		std::string data;
-		auto err = m_db.read(m_column, key, &data);
+		auto err = m_db.read(greylock::options::indexes_column, key, &data);
 		if (err) {
 			set_shard_index(-1);
 			return;

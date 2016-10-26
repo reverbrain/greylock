@@ -128,9 +128,9 @@ int main(int argc, char *argv[])
 			std::vector<std::string> cmp;
 			size_t pos = 0;
 			for (int i = 0; i < 2; ++i) {
-				size_t dot = iname.find(':', pos);
+				size_t dot = iname.find('.', pos);
 				if (dot == std::string::npos) {
-					std::cerr << "invalid index name " << iname << ", must be mailbox:attribute:index" << std::endl;
+					std::cerr << "invalid index name " << iname << ", must be mailbox.attribute.index" << std::endl;
 					return -1;
 				}
 
@@ -173,15 +173,13 @@ int main(int argc, char *argv[])
 				sout.write(sdata.data(), sdata.size());
 			}
 
-			int column = db.options().get_column_from_prefix(mbox);
-
 			std::set<greylock::document_for_index> sidx;
 
 			std::cout << "Number of shards: " << shards.size() << ", shards: " << greylock::dump_vector(shards) << std::endl;
 			for (auto shard_number: shards) {
 				std::string ikey = greylock::document::generate_index_key_shard_number(index_base, shard_number);
 				std::string idata;
-				auto err = db.read(column, ikey, &idata);
+				auto err = db.read(greylock::options::indexes_column, ikey, &idata);
 				if (err) {
 					fprintf(stderr, "could not read index %s: %s [%d]\n",
 							ikey.c_str(), err.message().c_str(), err.code());

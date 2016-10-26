@@ -34,7 +34,7 @@ struct mailbox_query {
 
 	greylock::error_info parse_error;
 
-	mailbox_query(const greylock::options &options, std::string &mb, const rapidjson::Value &doc) : mbox(mb) {
+	mailbox_query(const greylock::options &options, const rapidjson::Value &doc) {
 		const rapidjson::Value &query_and = greylock::get_object(doc, "query");
 		if (query_and.IsObject()) {
 			auto ireq = indexes::get_indexes(options, query_and);
