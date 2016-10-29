@@ -216,6 +216,7 @@ public:
 		disk_index index;
 		greylock::error_info err;
 		std::set<document_for_index> unique_index;
+		size_t ocount = 0;
 
 		if (old_value) {
 			err = deserialize(index, old_value->data(), old_value->size());
@@ -226,6 +227,7 @@ public:
 			}
 
 			unique_index.insert(index.ids.begin(), index.ids.end());
+			ocount = unique_index.size();
 		}
 
 		for (const auto& value : operand_list) {
@@ -259,11 +261,10 @@ public:
 
 		if (new_value->size() > 1024 * 1024) {
 			size_t osize = 0;
-			if (old_value) {
+			if (old_value)
 				osize = old_value->size();
-			}
-			rocksdb::Warn(logger, "index_merge: key: %s, size: %ld -> %ld",
-					key.ToString().c_str(), osize, new_value->size());
+			rocksdb::Info(logger, "index_merge: key: %s, size: %ld -> %ld, counts: %ld -> %ld",
+					key.ToString().c_str(), osize, new_value->size(), ocount, index.ids.size());
 		}
 
 		return true;
