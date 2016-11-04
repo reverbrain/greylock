@@ -294,7 +294,7 @@ struct document {
 	static std::string generate_index_base(const options &options,
 			const std::string &mbox, const std::string &attr, const std::string &token) {
 		(void) options;
-		char ckey[mbox.size() + attr.size() + token.size() + 3 + 17];
+		char ckey[mbox.size() + attr.size() + token.size() + 5];
 		size_t csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s",
 				mbox.c_str(), attr.c_str(), token.c_str());
 
@@ -302,7 +302,7 @@ struct document {
 	}
 
 	static std::string generate_index_key_shard_number(const std::string &base, size_t sn) {
-		char ckey[base.size() + 17];
+		char ckey[base.size() + 19];
 		size_t csize = snprintf(ckey, sizeof(ckey), "%016lx.%s", sn, base.c_str());
 
 		return std::string(ckey, csize);
@@ -320,12 +320,7 @@ struct document {
 
 	static std::string generate_shard_key(const options &options,
 			const std::string &mbox, const std::string &attr, const std::string &token) {
-		(void) options;
-		char ckey[mbox.size() + attr.size() + token.size() + 5];
-		size_t csize = snprintf(ckey, sizeof(ckey), "%s.%s.%s",
-				mbox.c_str(), attr.c_str(), token.c_str());
-
-		return std::string(ckey, csize);
+		return generate_index_base(options, mbox, attr, token);
 	}
 };
 
