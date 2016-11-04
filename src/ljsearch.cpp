@@ -651,6 +651,28 @@ public:
 	ribosome::error_info process_one_document(greylock::document &&doc) {
 		ribosome::split spl;
 
+		auto fix_username = [] (const std::string &s) -> std::string {
+			static const std::string users_prefix = "users.livejournal.com/";
+			size_t apos = s.find(users_prefix);
+			if (apos != std::string::npos) {
+				std::string user;
+				char *start = (char *)s.c_str() + users_prefix.size() + apos;
+				char *end = strchr(start, '/');
+				if (end) {
+					user.assign(start, end - start);
+				} else {
+					user.assign(start);
+				}
+
+				return user + ".livejournal.com";
+			}
+
+			return s;
+		};
+
+		doc.author = fix_username(doc.author);
+
+
 		auto split_content = [&] (const std::string &content, greylock::attribute *a) {
 			std::set<std::string> stems;
 
