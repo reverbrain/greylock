@@ -93,40 +93,13 @@ public:
 	}
 
 	~serializer() {
-		m_need_exit = true;
-		if (m_mover)
-			m_mover->join();
 	}
 
 	ribosome::error_info submit_work(int worker, size_t sn, bool flush) {
+		(void) worker;
+		(void) sn;
+		(void) flush;
 		return ribosome::error_info();
-
-		if (!m_mover) {
-			std::lock_guard<std::mutex> guard(m_lock);
-			if (!m_mover)
-				m_mover.reset(new std::thread(std::bind(&serializer::move, this)));
-		}
-
-		if (!flush) {
-			std::unique_lock<std::mutex> guard(m_lock);
-			m_sns[worker] = sn;
-			size_t min_sn = *std::min_element(m_sns.begin(), m_sns.end());
-			if (min_sn > m_processed_sn) {
-				m_wait.wait(guard, [&] () {return *std::min_element(m_sns.begin(), m_sns.end()) <= m_processed_sn;});
-			}
-
-			return ribosome::error_info();
-		}
-
-		auto err = process_indexes(sn);
-		if (err)
-			return err;
-
-		err = process_shards();
-		if (err)
-			return err;
-
-		return err;
 	}
 
 	ribosome::error_info sync() {
@@ -138,98 +111,6 @@ private:
 
 	std::mutex m_lock;
 	std::vector<size_t> m_sns;
-	size_t m_processed_sn = 0;
-	size_t m_processed_keys = 0;
-
-	bool m_need_exit = false;
-	std::condition_variable m_wait;
-	std::unique_ptr<std::thread> m_mover;
-
-	void move() {
-		ribosome::timer tm;
-		while (!m_need_exit) {
-			tm.restart();
-
-			m_processed_sn = *std::min_element(m_sns.begin(), m_sns.end());
-			submit_work(0, m_processed_sn, true);
-			printf("sync: boundary shard number: %ld, processed keys: %ld, time: %.3f seconds\n",
-					m_processed_sn, m_processed_keys, tm.elapsed() / 1000.);
-
-			size_t new_sn = *std::min_element(m_sns.begin(), m_sns.end());
-			m_wait.notify_all();
-
-			if (new_sn == m_processed_sn)
-				sleep(1);
-		}
-	}
-
-	ribosome::error_info process_indexes(size_t sn) {
-		return process_column(sn, greylock::options::indexes_column, greylock::options::indexes_column,
-				[&] (size_t sn, const rocksdb::Slice &key) -> bool {
-					for (size_t i = 0; i < key.size(); ++i) {
-						if (key[i] == '.') {
-							std::string sn_str(key.data(), i);
-							size_t shard_number = strtoull(sn_str.c_str(), NULL, 16);
-							return shard_number < sn;
-						}
-					}
-
-					return false;
-				});
-	}
-	ribosome::error_info process_shards() {
-		return process_column(0, greylock::options::token_shards_column, greylock::options::token_shards_column,
-				[&] (size_t sn, const rocksdb::Slice &key) -> bool {
-					(void) sn;
-					(void) key;
-
-					return true;
-				});
-	}
-
-	ribosome::error_info process_column(size_t sn, int in_column, int out_column,
-			std::function<bool (size_t, const rocksdb::Slice &)> cmp) {
-		auto it = m_db.iterator(in_column, rocksdb::ReadOptions());
-		it->SeekToFirst();
-		if (!it->Valid()) {
-			auto s = it->status();
-			return ribosome::create_error(-s.code(), "iterator is not valid, input column: %s [%d], error: %s",
-					m_db.options().column_name(in_column).c_str(), in_column, s.ToString().c_str());
-		}
-
-		rocksdb::WriteBatch batch;
-		m_processed_keys = 0;
-
-		for (; it->Valid(); it->Next()) {
-			auto value = it->value();
-			auto key = it->key();
-
-			if (!cmp(sn, key))
-				break;
-
-#if 0
-			printf("moving key: %s: %s -> %s\n",
-					key.ToString().c_str(),
-					m_db.options().column_name(in_column).c_str(),
-					m_db.options().column_name(out_column).c_str());
-#endif
-
-			batch.Merge(m_db.cfhandle(out_column), key, value);
-			batch.Delete(m_db.cfhandle(in_column), key);
-
-			m_processed_keys++;
-		}
-
-		if (batch.Count()) {
-			auto err = m_db.write(&batch);
-			if (err) {
-				return ribosome::create_error(err.code(), "could not write batch into column %s [%d]: %s",
-					m_db.options().column_name(out_column).c_str(), out_column, err.message().c_str());
-			}
-		}
-
-		return ribosome::error_info();
-	}
 };
 
 template <typename T>
