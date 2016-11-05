@@ -31,13 +31,13 @@
 namespace ioremap { namespace greylock {
 
 struct options {
-	size_t tokens_shard_size = 3600 * 1;
+	size_t tokens_shard_size = 3600 * 1 * 24;
 
 	int max_threads = 8;
 
 	int bits_per_key = 10; // bloom filter parameter
 
-	long lru_cache_size = 1000 * 1024 * 1024; // 1000 MB of uncompressed data cache
+	long lru_cache_size = 100 * 1024 * 1024; // 100 MB of uncompressed data cache
 
 	long sync_metadata_timeout = 60000; // 60 seconds
 
@@ -69,6 +69,13 @@ struct options {
 		column_names[token_shards_column] = "token_shards";
 		column_names[indexes_column] = "indexes";
 		column_names[meta_column] = "meta";
+	}
+
+	std::string column_name(int cnum) const {
+		if (cnum < 0 || cnum >= __column_size)
+			return "";
+
+		return column_names[cnum];
 	}
 };
 
@@ -474,12 +481,13 @@ public:
 		dbo.IncreaseParallelism(m_opts.max_threads);
 
 		dbo.max_bytes_for_level_base = 1024 * 1024 * 1024 * 100UL;
-		dbo.write_buffer_size = 1024 * 1024 * 1024UL;
-		dbo.max_write_buffer_number = 10;
-		dbo.min_write_buffer_number_to_merge = 4;
+		//dbo.write_buffer_size = 1024 * 1024 * 1024UL;
+		//dbo.max_write_buffer_number = 10;
+		//dbo.min_write_buffer_number_to_merge = 4;
 
 		dbo.compression = rocksdb::kZSTDNotFinalCompression;
-		dbo.num_levels = 5;
+		dbo.num_levels = 10;
+#if 0
 		dbo.compression_per_level =
 			std::vector<rocksdb::CompressionType>({
 					rocksdb::kZSTDNotFinalCompression,
@@ -488,6 +496,7 @@ public:
 					rocksdb::kZSTDNotFinalCompression,
 					rocksdb::kZSTDNotFinalCompression,
 				});
+#endif
 		dbo.compression_opts = rocksdb::CompressionOptions(-14, 5, 0, 0);
 
 		dbo.create_if_missing = true;
@@ -508,6 +517,7 @@ public:
 		rocksdb::ColumnFamilyOptions cfo(dbo);
 
 		std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
+
 		for (size_t i = 0; i < options().column_names.size(); ++i) {
 			auto cname = options().column_names[i];
 
