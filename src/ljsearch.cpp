@@ -1220,6 +1220,7 @@ int main(int argc, char *argv[])
 
 					if (last_print.elapsed() > print_interval) {
 						printf("%s: rewind: %ld\n", input.c_str(), rewind);
+						last_print.restart();
 					}
 
 					if (rewind == 0) {
@@ -1324,6 +1325,7 @@ int main(int argc, char *argv[])
 				rewind--;
 				if (last_print.elapsed() > print_interval) {
 					printf("rewind: %ld\n", rewind);
+					last_print.restart();
 				}
 
 				if (rewind == 0) {
