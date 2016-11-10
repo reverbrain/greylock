@@ -1320,6 +1320,19 @@ int main(int argc, char *argv[])
 		size_t prev_shard_number = 0;
 		std::list<greylock::document> docs;
 		for (; it->Valid(); it->Next()) {
+			if (rewind) {
+				rewind--;
+				if (last_print.elapsed() > print_interval) {
+					printf("rewind: %ld\n", rewind);
+				}
+
+				if (rewind == 0) {
+					realtm.restart();
+					printf("\n");
+				}
+				continue;
+			}
+
 			auto sl = it->value();
 
 			greylock::document doc;
