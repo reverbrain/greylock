@@ -7,6 +7,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 
+#include <ribosome/timer.hpp>
+
 using namespace ioremap;
 
 static inline const char *print_time(long tsec, long tnsec)
@@ -98,6 +100,8 @@ int main(int argc, char *argv[])
 				return err.code();
 			}
 		}
+
+		ribosome::timer tm;
 
 		auto print_index = [&](const greylock::id_t &id) -> std::string {
 			long tsec, aux;
@@ -265,6 +269,8 @@ int main(int argc, char *argv[])
 			std::cout << "indexed_id: " << print_index(doc.indexed_id) <<
 				", doc: " << print_doc(doc) << std::endl;
 		}
+
+		printf("Operation took %.2f seconds\n", tm.elapsed() / 1000.); 
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
 	}
