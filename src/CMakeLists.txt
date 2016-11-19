@@ -31,6 +31,10 @@ add_executable(greylock_check check.cpp)
 target_link_libraries(greylock_check
 	greylock
 )
+add_executable(greylock_compact compact.cpp)
+target_link_libraries(greylock_compact
+	greylock
+)
 
 install(TARGETS	greylock
 	LIBRARY DESTINATION lib${LIB_SUFFIX}
