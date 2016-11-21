@@ -34,9 +34,11 @@ int main(int argc, char *argv[])
 
 
 	std::string dpath;
+	int chunks;
 	bpo::options_description gr("Compaction options");
 	gr.add_options()
 		("path", bpo::value<std::string>(&dpath)->required(), "path to rocksdb database")
+		("chunks", bpo::value<int>(&chunks)->default_value(1), "number of chunks compacted separately")
 		;
 
 	bpo::options_description cmdline_options;
@@ -68,13 +70,18 @@ int main(int argc, char *argv[])
 			return err.code();
 		}
 
-		long open_time = tm.elapsed();
+#define SECONDS(x) ((x) / 1000.)
 
-		db.compact();
+		long open_time = tm.elapsed();
+		printf("Time to open database: %.2f seconds\n", SECONDS(open_time));
+
+		while (--chunks >= 0) {
+			db.compact();
+		}
 
 		long compact_time = tm.elapsed() - open_time;
 
-		printf("Time to open database: %.2f seconds, compact: %.2f seconds\n", open_time / 1000., compact_time / 1000.); 
+		printf("Time to open database: %.2f seconds, compact: %.2f seconds\n", SECONDS(open_time), SECONDS(compact_time)); 
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
 	}
