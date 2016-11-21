@@ -84,7 +84,7 @@ struct indexes {
 		auto merge_one = [&] (const std::vector<attribute> &v) {
 			for (auto &a: v) {
 				if (a.tokens.empty())
-					return;
+					continue;
 
 				auto it = attrs.find(a.name);
 				if (it == attrs.end()) {
@@ -128,13 +128,14 @@ struct indexes {
 					std::ostringstream ss;
 					ss << a.name;
 					if (a.tokens.size()) {
-						ss << ": tokens: ";
+						ss << "{";
 						for (size_t i = 0; i < a.tokens.size(); ++i) {
 							auto &token = a.tokens[i];
 							ss << token.name;
 							if (i != a.tokens.size() - 1)
 								ss << " ";
 						}
+						ss << "}";
 					}
 					return ss.str();
 				});
