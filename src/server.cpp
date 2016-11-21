@@ -615,8 +615,9 @@ private:
 			return false;
 		}
 		bool ro = greylock::get_bool(config, "read_only", false);
+		bool bulk = greylock::get_bool(config, "bulk_upload", false);
 
-		auto err = db->open(path, ro);
+		auto err = db->open(path, ro, bulk);
 		if (err) {
 			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;

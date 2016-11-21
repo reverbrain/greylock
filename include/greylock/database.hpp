@@ -464,13 +464,13 @@ public:
 	}
 
 	greylock::error_info open_read_only(const std::string &path) {
-		return open(path, true);
+		return open(path, true, false);
 	}
 	greylock::error_info open_read_write(const std::string &path) {
-		return open(path, false);
+		return open(path, false, false);
 	}
 
-	greylock::error_info open(const std::string &path, bool ro) {
+	greylock::error_info open(const std::string &path, bool ro, bool bulk) {
 		if (m_db) {
 			return greylock::create_error(-EINVAL, "database is already opened");
 		}
@@ -501,11 +501,10 @@ public:
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
-#if 0
-		if (!ro) {
+
+		if (!ro && bulk) {
 			dbo.PrepareForBulkLoad();
 		}
-#endif
 
 		dbo.statistics = rocksdb::CreateDBStatistics();
 		dbo.stats_dump_period_sec = 60;
