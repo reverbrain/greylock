@@ -24,6 +24,7 @@
 using namespace ioremap;
 
 static const std::string drop_characters = "`~-=!@#$%^&*()_+[]\\{}|';\":/.,?><\n\r\t ";
+static ribosome::alphabet drop_alphabet;
 static ribosome::alphabet supported_alphabet;
 static ribosome::numbers_alphabet numbers_alphabet;
 
@@ -585,7 +586,7 @@ public:
 			ribosome::lstring lt = ribosome::lconvert::from_utf8(content);
 			auto lower_request = ribosome::lconvert::to_lower(lt);
 
-			auto all_words = spl.convert_split_words(lower_request);
+			auto all_words = spl.convert_split_words_drop_alphabet(lower_request, drop_alphabet);
 			for (size_t pos = 0; pos < all_words.size(); ++pos) {
 				auto &idx = all_words[pos];
 				std::string word = ribosome::lconvert::to_string(idx);
@@ -632,13 +633,13 @@ public:
 		}
 
 		for (auto &url: doc.ctx.links) {
-			auto all_urls = spl.convert_split_words(url.c_str(), url.size());
+			auto all_urls = spl.convert_split_words_drop_alphabet(ribosome::lconvert::from_utf8(url), drop_alphabet);
 			for (auto &u: all_urls) {
 				urls.insert(ribosome::lconvert::to_string(u), 0);
 			}
 		}
 		for (auto &url: doc.ctx.images) {
-			auto all_urls = spl.convert_split_words(url.c_str(), url.size());
+			auto all_urls = spl.convert_split_words_drop_alphabet(ribosome::lconvert::from_utf8(url), drop_alphabet);
 			for (auto &u: all_urls) {
 				urls.insert(ribosome::lconvert::to_string(u), 0);
 			}
@@ -882,7 +883,7 @@ public:
 	}
 
 	ribosome::error_info open(const std::string &dbpath) {
-		auto err = m_db.open_read_write(dbpath);
+		auto err = m_db.open(dbpath, false, true);
 		if (err)
 			return ribosome::create_error(err.code(), "%s", err.message().c_str());
 
@@ -1276,6 +1277,7 @@ int main(int argc, char *argv[])
 			return gerr.code();
 		}
 
+		drop_alphabet.merge(drop_characters);
 		for (auto &a: als) {
 			supported_alphabet.merge(a);
 		}
