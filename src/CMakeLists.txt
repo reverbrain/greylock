@@ -36,16 +36,17 @@ target_link_libraries(greylock_compact
 	greylock
 )
 
+add_executable(greylock_merge merge.cpp)
+target_link_libraries(greylock_merge
+	greylock
+)
+
 install(TARGETS	greylock
 	LIBRARY DESTINATION lib${LIB_SUFFIX}
 	ARCHIVE DESTINATION lib${LIB_SUFFIX}
 	BUNDLE DESTINATION library
 )
-install(TARGETS	greylock_server greylock_meta greylock_check
+install(TARGETS	greylock_server greylock_meta greylock_check greylock_compact greylock_merge
 	RUNTIME DESTINATION bin COMPONENT runtime
 )
 
-add_executable(greylock_merge merge.cpp)
-target_link_libraries(greylock_merge
-	greylock
-)
