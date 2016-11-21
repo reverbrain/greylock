@@ -501,7 +501,11 @@ public:
 
 		dbo.create_if_missing = true;
 		dbo.create_missing_column_families = true;
-
+#if 0
+		if (!ro) {
+			dbo.PrepareForBulkLoad();
+		}
+#endif
 
 		dbo.statistics = rocksdb::CreateDBStatistics();
 		dbo.stats_dump_period_sec = 60;
