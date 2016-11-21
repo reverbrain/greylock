@@ -54,8 +54,7 @@ rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root,-)
-%{_bindir}/greylock_server
-%{_bindir}/greylock_meta
+%{_bindir}/greylock_*
 %{_libdir}/libgreylock.so.*
 %doc conf/
 
