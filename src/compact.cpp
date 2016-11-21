@@ -34,9 +34,13 @@ int main(int argc, char *argv[])
 
 
 	std::string dpath;
+	long csize_mb;
+	std::string cname;
 	bpo::options_description gr("Compaction options");
 	gr.add_options()
 		("path", bpo::value<std::string>(&dpath)->required(), "path to rocksdb database")
+		("column", bpo::value<std::string>(&cname)->required(), "Column name to compact")
+		("size", bpo::value<long>(&csize_mb)->default_value(1024), "Number of MBs to compact in one chunk")
 		;
 
 	bpo::options_description cmdline_options;
@@ -58,6 +62,17 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	greylock::options opt;
+	auto it = std::find(opt.column_names.begin(), opt.column_names.end(), cname);
+	if (it == opt.column_names.end()) {
+		std::cerr << "Invalig column " << cname << ", supported columns: " << greylock::dump_vector(opt.column_names) << std::endl;
+		return -EINVAL;
+	}
+
+	auto column_id = std::distance(opt.column_names.begin(), it);
+
+#define SECONDS(x) ((x) / 1000.)
+
 	try {
 		ribosome::timer tm;
 
@@ -67,14 +82,58 @@ int main(int argc, char *argv[])
 			std::cerr << "could not open database: " << err.message();
 			return err.code();
 		}
-
 		long open_time = tm.elapsed();
+		printf("%.2fs : %.2fs: database has been opened\n", SECONDS(tm.elapsed()), SECONDS(open_time)); 
 
-		db.compact();
+		rocksdb::ReadOptions ro;
+		auto it = db.iterator(column_id, ro);
+		it->SeekToFirst();
+		long position_time = tm.elapsed() - open_time;
+		printf("%.2fs : %.2fs: database has been positioned\n", SECONDS(tm.elapsed()), SECONDS(position_time));
 
-		long compact_time = tm.elapsed() - open_time;
+		if (!it->Valid()) {
+			auto s = it->status();
+			fprintf(stderr, "iterator is not valid: %s [%d]", s.ToString().c_str(), s.code());
+			return -s.code();
+		}
 
-		printf("Time to open database: %.2f seconds, compact: %.2f seconds\n", open_time / 1000., compact_time / 1000.); 
+		long compact_size = csize_mb * 1024 * 1024;
+
+		long compaction_start_time = tm.elapsed();
+		while (it->Valid()) {
+			long compaction_tmp_start_time = tm.elapsed();
+
+			long current_size = 0;
+			rocksdb::Slice start, end;
+
+			start = it->key();
+			while (it->Valid() && current_size < compact_size) {
+				current_size += it->value().size();
+				end = it->key();
+
+				it->Next();
+			}
+
+			db.compact(column_id, start, end);
+			long compaction_time = tm.elapsed() - compaction_tmp_start_time;
+
+			printf("%.2fs : %.2fs: compaction: start: %s, end: %s, size: %.2f MB\n",
+					SECONDS(tm.elapsed()), SECONDS(compaction_time),
+					start.ToString().c_str(), end.ToString().c_str(),
+					current_size / (1024. * 1024.)); 
+		}
+
+		if (!it->Valid()) {
+			auto s = it->status();
+			if (s.code() != 0) {
+				fprintf(stderr, "iterator has become invalid during iteration: %s [%d]", s.ToString().c_str(), s.code());
+				return -s.code();
+			}
+		}
+
+		long compaction_time = tm.elapsed() - compaction_start_time;
+
+		printf("%.2fs : %.2fs: database has been compacted\n", SECONDS(tm.elapsed()), SECONDS(compaction_time));
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
 	}
