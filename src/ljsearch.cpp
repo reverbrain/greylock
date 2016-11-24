@@ -239,6 +239,8 @@ private:
 struct worker_stats {
 	long documents = 0;
 	long lines = 0;
+	long indexes = 0;
+	long shards = 0;
 	long empty_authors = 0;
 	long skipped_documents = 0;
 	long processed_text_size = 0;
@@ -250,6 +252,8 @@ struct worker_stats {
 	worker_stats &operator+(const worker_stats &other) {
 		documents += other.documents;
 		lines += other.lines;
+		indexes += other.indexes;
+		shards += other.shards;
 		empty_authors += other.empty_authors;
 		skipped_documents += other.skipped_documents;
 		processed_text_size += other.documents;
@@ -317,7 +321,9 @@ public:
 		rocksdb::WriteBatch indexes_batch, shards_batch;
 
 		long indexes_data_size = 0;
+		long indexes = 0;
 		long shards_data_size = 0;
+		long shards = 0;
 
 		token_indexes_t token_indexes;
 		token_shards_t token_shards;
@@ -347,6 +353,7 @@ public:
 
 			token_shards.clear();
 
+			shards = shards_batch.Count();
 			shards_write_error = m_db.write(&shards_batch);
 		});
 
@@ -358,6 +365,7 @@ public:
 			indexes_data_size += sdi.size();
 		}
 
+		indexes = indexes_batch.Count();
 		indexes_write_error = m_db.write(&indexes_batch);
 
 		shards_thread.join();
@@ -376,6 +384,8 @@ public:
 			return err;
 
 		wstats->documents += docs;
+		wstats->indexes += indexes;
+		wstats->shards += shards;
 		wstats->empty_authors += m_empty_authors;
 		wstats->written_data_size += indexes_data_size + shards_data_size;
 
@@ -797,6 +807,8 @@ private:
 struct parse_stats {
 	long documents = 0;
 	long lines = 0;
+	long indexes = 0;
+	long shards = 0;
 	long skipped_documents = 0;
 	long skipped_text_size = 0;
 	long processed_text_size = 0;
@@ -807,6 +819,8 @@ struct parse_stats {
 	void merge(const worker_stats &ws) {
 		documents += ws.documents;
 		lines += ws.lines;
+		indexes += ws.indexes;
+		shards += ws.shards;
 		skipped_documents += ws.skipped_documents;
 		skipped_text_size += ws.skipped_text_size;
 		processed_text_size += ws.processed_text_size;
@@ -827,6 +841,8 @@ struct parse_stats {
 	parse_stats &operator-=(const parse_stats &other) {
 		documents -= other.documents;
 		lines -= other.lines;
+		indexes -= other.indexes;
+		shards -= other.shards;
 		skipped_documents -= other.skipped_documents;
 		skipped_text_size -= other.skipped_text_size;
 		processed_text_size -= other.processed_text_size;
@@ -1092,12 +1108,15 @@ int main(int argc, char *argv[])
 	cache_control cc;
 	long print_interval;
 	size_t shard_chunk_size = 10000;
+	size_t index_documents;
 	generic.add_options()
 		("help", "This help message")
 		("input", bpo::value<std::vector<std::string>>(&inputs)->composing(), "Livejournal dump files packed with bzip2")
 		("indexdb", bpo::value<std::string>(&indexdb), "Rocksdb database where livejournal posts are stored")
-		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database")
+		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database (when indexing, '.NNN suffix will be added)")
 		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
+		("index-documents", bpo::value<size_t>(&index_documents)->default_value(100000000),
+			"Number of documents to be indexed and put into single output database")
 		("rewind-doc", bpo::value<std::string>(&rewind_doc), "Rewind document iterator to this document id")
 		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of parser threads")
 		("alphabet", bpo::value<std::vector<std::string>>(&als)->composing(), "Allowed alphabet")
@@ -1177,13 +1196,25 @@ int main(int argc, char *argv[])
 
 		parse_stats dps = ps - prev_ps;
 
+		long indexes_per_document = ps.indexes;
+		if (ps.documents)
+			indexes_per_document /= ps.documents;
+		long shards_per_document = ps.shards;
+		if (ps.documents)
+			shards_per_document /= ps.documents;
+
+		auto lps = ps.lines * 1000.0 / (float)realtm.elapsed();
+		auto dlps = dps.lines * 1000.0 / (float)last_print.elapsed();
+		auto lines_per_second = lps * 0.8 + dlps * 0.2;
+
 		snprintf(tmp, sizeof(tmp),
-			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, speed: %.2f MB/s %.2f [%.2f] lines/s, %s",
+			"%s: %ld seconds: loaded: %.2f MBs, documents: %ld, indexes: %ld [%ld], shards: %ld [%ld], "
+			"speed: %.2f lines/s, %s",
 			print_time(ts.tv_sec, ts.tv_nsec),
 			tm.elapsed() / 1000, total_size / (1024 * 1024.0),
 			ps.documents + rewind_lines,
-			real_size * 1000.0 / (realtm.elapsed() * 1024 * 1024.0),
-			ps.lines * 1000.0 / (float)realtm.elapsed(), dps.lines * 1000.0 / (float)last_print.elapsed(),
+			ps.indexes, indexes_per_document, ps.shards, shards_per_document,
+			lines_per_second,
 			ps.print_stats().c_str());
 		prev_ps = ps;
 		last_print.restart();
@@ -1264,11 +1295,6 @@ int main(int argc, char *argv[])
 		}
 
 		lj_parser<std::list<greylock::document>> parser(thread_num, cc);
-		auto err = parser.open(output);
-		if (err) {
-			std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
-			return err.code();
-		}
 
 		greylock::database idb;
 		auto gerr = idb.open_read_only(indexdb);
@@ -1281,7 +1307,7 @@ int main(int argc, char *argv[])
 		for (auto &a: als) {
 			supported_alphabet.merge(a);
 		}
-		err = parser.load_langdetect_stats(lang_path);
+		auto err = parser.load_langdetect_stats(lang_path);
 		if (err) {
 			std::cerr << "could not open load language stats: " << err.message() << std::endl;
 			return err.code();
@@ -1320,57 +1346,81 @@ int main(int argc, char *argv[])
 
 		realtm.restart();
 
-		size_t prev_shard_number = 0;
-		std::list<greylock::document> docs;
-		for (; it->Valid(); it->Next()) {
-			if (rewind) {
-				rewind--;
+		int output_database = 0;
+		while (it->Valid()) {
+			std::string output_name = output + "." + std::to_string(output_database);
+			auto err = parser.open(output_name);
+			if (err) {
+				std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
+				return err.code();
+			}
+
+			output_database++;
+
+			size_t current_documents = 0;
+			size_t prev_shard_number = 0;
+			std::list<greylock::document> docs;
+			for (; it->Valid(); it->Next()) {
+				if (rewind) {
+					rewind--;
+					if (last_print.elapsed() > print_interval) {
+						printf("rewind: %ld\n", rewind);
+						last_print.restart();
+					}
+
+					if (rewind == 0) {
+						realtm.restart();
+						printf("\n");
+					}
+					continue;
+				}
+
+				auto sl = it->value();
+
+				greylock::document doc;
+				gerr = deserialize(doc, sl.data(), sl.size());
+				if (gerr) {
+					fprintf(stderr, "could not deserialize document, key: %s, size: %ld, error: %s [%d]\n",
+							it->key().ToString().c_str(), sl.size(), gerr.message().c_str(), gerr.code());
+					return gerr.code();
+				}
+
+				total_size += doc.ctx.content.size() + doc.ctx.title.size();
+				real_size += doc.ctx.content.size() + doc.ctx.title.size();
+
+				size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
+				if (shard_number > 0xffffffff) {
+					printf("shard_number: %ld [%lx], id: %s, doc: %s\n",
+							shard_number, shard_number,
+							doc.indexed_id.to_string().c_str(), doc.id.c_str());
+				}
+
+				if ((docs.size() && (shard_number != prev_shard_number)) || docs.size() == shard_chunk_size) {
+					if (shard_number != prev_shard_number) {
+						//printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
+					}
+
+					parser.queue_work(std::move(docs));
+					docs.clear();
+				}
+
+				// reopen shard, current document will be deserialized again and put into new db
+				if (++current_documents > index_documents && docs.empty()) {
+					parser.write_indexes();
+					parser.sync();
+					parser.compact();
+					printf("Compaction of %s has been completed\n", output_name.c_str());
+					break;
+				}
+
+				prev_shard_number = shard_number;
+				docs.emplace_back(doc);
+
 				if (last_print.elapsed() > print_interval) {
-					printf("rewind: %ld\n", rewind);
-					last_print.restart();
+					printf("%s\n", print_stats(parser.pstats()));
 				}
 
-				if (rewind == 0) {
-					realtm.restart();
-					printf("\n");
-				}
-				continue;
-			}
 
-			auto sl = it->value();
-
-			greylock::document doc;
-			gerr = deserialize(doc, sl.data(), sl.size());
-			if (gerr) {
-				fprintf(stderr, "could not deserialize document, key: %s, size: %ld, error: %s [%d]\n",
-						it->key().ToString().c_str(), sl.size(), gerr.message().c_str(), gerr.code());
-				return gerr.code();
-			}
-
-			total_size += doc.ctx.content.size() + doc.ctx.title.size();
-			real_size += doc.ctx.content.size() + doc.ctx.title.size();
-
-			size_t shard_number = greylock::document::generate_shard_number(greylock::options(), doc.indexed_id);
-			if (shard_number > 0xffffffff) {
-				printf("shard_number: %ld [%lx], id: %s, doc: %s\n",
-						shard_number, shard_number,
-						doc.indexed_id.to_string().c_str(), doc.id.c_str());
-			}
-
-			if ((docs.size() && (shard_number != prev_shard_number)) || docs.size() == shard_chunk_size) {
-				if (shard_number != prev_shard_number) {
-					//printf("%s, shard: %ld, docs: %ld\n", print_stats(parser.pstats()), prev_shard_number, docs.size());
-				}
-
-				parser.queue_work(std::move(docs));
-				docs.clear();
-			}
-
-			prev_shard_number = shard_number;
-			docs.emplace_back(doc);
-
-			if (last_print.elapsed() > print_interval) {
-				printf("%s\n", print_stats(parser.pstats()));
 			}
 		}
 
