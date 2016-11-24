@@ -7,7 +7,7 @@ FROM reverbrain/xenial-dev
 #	curl http://repo.reverbrain.com/REVERBRAIN.GPG | apt-key add - && \
 #	apt-get update && \
 #	apt-get upgrade -y && \
-#	apt-get install -y git g++ liblz4-dev libsnappy-dev zlib1g-dev libbz2-dev libgflags-dev libjemalloc-dev && \
+#	apt-get install -y git g++ liblz4-dev libsnappy-dev zlib1g-dev libbz2-dev libzstd-dev libgflags-dev libjemalloc-dev && \
 #	apt-get install -y cmake debhelper cdbs devscripts && \
 #	apt-get install -y libboost-system-dev libboost-filesystem-dev libboost-program-options-dev && \
 #	apt-get install -y libmsgpack-dev libswarm3-dev libthevoid3-dev ribosome-dev && \

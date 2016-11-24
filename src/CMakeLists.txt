@@ -36,22 +36,23 @@ target_link_libraries(greylock_compact
 	greylock
 )
 
+add_executable(greylock_merge merge.cpp)
+target_link_libraries(greylock_merge
+	greylock
+)
+
 install(TARGETS	greylock
 	LIBRARY DESTINATION lib${LIB_SUFFIX}
 	ARCHIVE DESTINATION lib${LIB_SUFFIX}
 	BUNDLE DESTINATION library
-)
-install(TARGETS	greylock_server greylock_meta greylock_check
-	RUNTIME DESTINATION bin COMPONENT runtime
-)
-
-add_executable(greylock_merge merge.cpp)
-target_link_libraries(greylock_merge
-	greylock
 )
 
 add_executable(greylock_ljsearch ljsearch.cpp)
 target_link_libraries(greylock_ljsearch
 	greylock
 	${WARP_LIBRARIES}
+)
+
+install(TARGETS	greylock_server greylock_meta greylock_check greylock_compact greylock_merge
+	RUNTIME DESTINATION bin COMPONENT runtime
 )

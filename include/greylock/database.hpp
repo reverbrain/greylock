@@ -432,6 +432,25 @@ public:
 		}
 	}
 
+	void compact(size_t c, const rocksdb::Slice &start, const rocksdb::Slice &end) {
+		if (m_db && c < m_handles.size()) {
+			const rocksdb::Slice *b = NULL;
+			const rocksdb::Slice *e = NULL;
+
+			if (start != rocksdb::Slice()) {
+				b = &start;
+			}
+			if (end != rocksdb::Slice()) {
+				e = &end;
+			}
+
+			struct rocksdb::CompactRangeOptions opts;
+			opts.change_level = true;
+			opts.target_level = 0;
+			m_db->CompactRange(opts, cfhandle(c), b, e);
+		}
+	}
+
 	greylock::error_info sync_metadata(rocksdb::WriteBatch *batch) {
 		if (m_ro) {
 			return greylock::create_error(-EROFS, "read-only database");
