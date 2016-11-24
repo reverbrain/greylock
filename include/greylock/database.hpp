@@ -471,10 +471,6 @@ public:
 	}
 
 	greylock::error_info open(const std::string &path, bool ro, bool bulk) {
-		if (m_db) {
-			return greylock::create_error(-EINVAL, "database is already opened");
-		}
-
 		rocksdb::Options dbo;
 		dbo.max_open_files = 1000;
 		//dbo.disableDataSync = true;
