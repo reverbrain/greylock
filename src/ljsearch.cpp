@@ -1408,6 +1408,7 @@ int main(int argc, char *argv[])
 				if (++current_documents > index_documents && docs.empty()) {
 					parser.write_indexes();
 					parser.sync();
+					printf("%s: going to compact database %s\n", print_stats(parser.pstats()), output_name.c_str());
 					parser.compact();
 					printf("Compaction of %s has been completed\n", output_name.c_str());
 					break;
