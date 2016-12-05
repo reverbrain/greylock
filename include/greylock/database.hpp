@@ -403,6 +403,14 @@ public:
 
 class database {
 public:
+	database() {}
+	database(database &&other) :
+		m_ro(other.m_ro),
+		m_handles(other.m_handles),
+		m_db(std::move(other.m_db))
+	{
+	}
+
 	~database() {
 		if (!m_ro) {
 			m_expiration_timer.stop();
@@ -418,6 +426,11 @@ public:
 	}
 
 	rocksdb::ColumnFamilyHandle *cfhandle(int c) {
+		if (c < options::default_column || c >= options::__column_size) {
+			greylock::throw_error(-EINVAL, "invalid column %d, must be in range [%d, %d)",
+					c, options::default_column, options::__column_size);
+		}
+
 		return m_handles[c];
 	}
 

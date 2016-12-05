@@ -1,8 +1,8 @@
-#include "greylock/database.hpp"
 #include "greylock/error.hpp"
 #include "greylock/json.hpp"
 #include "greylock/jsonvalue.hpp"
 #include "greylock/intersection.hpp"
+#include "greylock/sharded_database.hpp"
 #include "greylock/types.hpp"
 #include "greylock/utils.hpp"
 
@@ -277,7 +277,7 @@ public:
 			}
 
 			greylock::search_result result;
-			greylock::intersector<greylock::database> inter(server()->db_docs(), server()->db_indexes());
+			greylock::intersector<greylock::sharded_database> inter(server()->db_docs(), server()->db_indexes());
 			result = inter.intersect(iq, std::bind(&on_search::check_result, this, std::ref(iq), std::placeholders::_1));
 
 			send_search_result(result);
@@ -576,15 +576,15 @@ public:
 		}
 	};
 
-	greylock::database &db_docs() {
+	greylock::sharded_database &db_docs() {
 		return m_db_docs;
 	}
-	greylock::database &db_indexes() {
+	greylock::sharded_database &db_indexes() {
 		return m_db_indexes;
 	}
 
 private:
-	greylock::database m_db_docs, m_db_indexes;
+	greylock::sharded_database m_db_docs, m_db_indexes;
 
 	bool rocksdb_init(const rapidjson::Value &config) {
 		const auto &rdbconf = greylock::get_object(config, "rocksdb.docs");
@@ -592,32 +592,70 @@ private:
 			ILOG_ERROR("there is no 'rocksdb.docs' object in config");
 			return false;
 		}
+		if (!rocksdb_config_parse_docs(rdbconf, &m_db_docs))
+			return false;
+
 
 		const auto &riconf = greylock::get_object(config, "rocksdb.indexes");
 		if (!riconf.IsObject()) {
 			ILOG_ERROR("there is no 'rocksdb.indexes' object in config");
 			return false;
 		}
-
-		if (!rocksdb_config_parse(rdbconf, &m_db_docs))
-			return false;
-
-		if (!rocksdb_config_parse(riconf, &m_db_indexes))
+		if (!rocksdb_config_parse_indexes(riconf, &m_db_indexes))
 			return false;
 
 		return true;
 	}
 
-	bool rocksdb_config_parse(const rapidjson::Value &config, greylock::database *db) {
-		const char *path = greylock::get_string(config, "path");
-		if (!path) {
-			ILOG_ERROR("there is no 'path' string in rocksdb config");
+	bool rocksdb_config_parse_docs(const rapidjson::Value &config, greylock::sharded_database *db) {
+		std::vector<std::string> docs;
+
+		auto &darr = greylock::get_array(config, "docs");
+		if (!darr.IsArray()) {
+			ILOG_ERROR("there is no 'docs' array in rocksdb config");
 			return false;
 		}
-		bool ro = greylock::get_bool(config, "read_only", false);
-		bool bulk = greylock::get_bool(config, "bulk_upload", false);
+		for (auto it = darr.Begin(), end = darr.End(); it != end; it++) {
+			if (it->IsString())
+				docs.push_back(it->GetString());
+		}
 
-		auto err = db->open(path, ro, bulk);
+		bool ro = greylock::get_bool(config, "read_only", false);
+
+		auto err = db->open(docs, ro);
+		if (err) {
+			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
+			return false;
+		}
+
+		return true;
+	}
+
+	bool rocksdb_config_parse_indexes(const rapidjson::Value &config, greylock::sharded_database *db) {
+		std::vector<std::string> indexes, shards;
+
+		auto &iarr = greylock::get_array(config, "indexes");
+		if (!iarr.IsArray()) {
+			ILOG_ERROR("there is no 'indexes' array in rocksdb config");
+			return false;
+		}
+		for (auto it = iarr.Begin(), end = iarr.End(); it != end; it++) {
+			if (it->IsString())
+				indexes.push_back(it->GetString());
+		}
+
+		auto &sarr = greylock::get_array(config, "shards");
+		if (sarr.IsArray()) {
+			for (auto it = sarr.Begin(), end = sarr.End(); it != end; it++) {
+				if (it->IsString())
+					shards.push_back(it->GetString());
+			}
+		}
+
+
+		bool ro = greylock::get_bool(config, "read_only", false);
+
+		auto err = db->open(indexes, shards, ro);
 		if (err) {
 			ILOG_ERROR("could not open database: %s [%d]", err.message().c_str(), err.code());
 			return false;

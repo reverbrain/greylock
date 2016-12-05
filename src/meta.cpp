@@ -1,6 +1,6 @@
 #include <iostream>
 
-#include "greylock/database.hpp"
+#include "greylock/sharded_database.hpp"
 #include "greylock/types.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -35,7 +35,8 @@ int main(int argc, char *argv[])
 		;
 
 
-	std::string dpath, ipath;
+	std::string dpath;
+	std::vector<std::string> indexes_path, shards_path;
 	std::string iname;
 	bool dump = false;
 	std::string id_str;
@@ -48,9 +49,14 @@ int main(int argc, char *argv[])
 		("rocksdb.docs", bpo::value<std::string>(&dpath),
 		 	"path to rocksdb containing documents, "
 			"will be opened in read-only mode, safe to be called if different process is already using it")
-		("rocksdb.indexes", bpo::value<std::string>(&ipath)->required(),
+		("rocksdb.indexes", bpo::value<std::vector<std::string>>(&indexes_path)->required()->composing(),
 		 	"path to rocksdb containing indexes, "
-			"will be opened in read-only mode, safe to be called if different process is already using it")
+			"will be opened in read-only mode, safe to be called if different process is already using it, "
+			"can be specified multiple times")
+		("rocksdb.shards", bpo::value<std::vector<std::string>>(&shards_path)->composing(),
+		 	"path to rocksdb containing shards, "
+			"will be opened in read-only mode, safe to be called if different process is already using it, "
+			"can be specified multiple times, if not specified, token_shards column from index databases will be used")
 		("dump", "dump document data to stdout")
 		;
 
@@ -85,10 +91,10 @@ int main(int argc, char *argv[])
 	}
 
 	try {
-		greylock::database db;
-		auto err = db.open_read_only(ipath);
+		greylock::sharded_database sdb;
+		auto err = sdb.open_read_only(indexes_path, shards_path);
 		if (err) {
-			std::cerr << "could not open database: " << err.message();
+			std::cerr << "could not open database: " << err.message() << std::endl;
 			return err.code();
 		}
 
@@ -96,7 +102,7 @@ int main(int argc, char *argv[])
 		if (dpath.size()) {
 			auto err = db_docs.open_read_only(dpath);
 			if (err) {
-				std::cerr << "could not open database: " << err.message();
+				std::cerr << "could not open database: " << err.message() << std::endl;
 				return err.code();
 			}
 		}
@@ -160,14 +166,20 @@ int main(int argc, char *argv[])
 			const std::string &attr = cmp[1];
 			const std::string &token = cmp[2];
 
-			std::string index_base = greylock::document::generate_index_base(db.options(), mbox, attr, token);
-			std::string skey = greylock::document::generate_shard_key(db.options(), mbox, attr, token);
-			std::vector<size_t> shards(db.get_shards(skey));
+			std::string index_base = greylock::document::generate_index_base(greylock::options(), mbox, attr, token);
+			std::string skey = greylock::document::generate_shard_key(greylock::options(), mbox, attr, token);
+			std::vector<size_t> shards;
+			auto err = sdb.read_shards(skey, &shards);
+			if (err) {
+				fprintf(stderr, "could not read shards %s: %s [%d]\n",
+						skey.c_str(), err.message().c_str(), err.code());
+				return err.code();
+			}
 
 			if (save_prefix.size()) {
 				std::ofstream sout(save_prefix + "/shards.bin", std::ios::trunc);
 				std::string sdata;
-				auto err = db.read(greylock::options::token_shards_column, skey, &sdata);
+				auto err = sdb.read(greylock::options::token_shards_column, skey, &sdata);
 				if (err) {
 					fprintf(stderr, "could not read shards %s: %s [%d]\n",
 							skey.c_str(), err.message().c_str(), err.code());
@@ -183,7 +195,7 @@ int main(int argc, char *argv[])
 			for (auto shard_number: shards) {
 				std::string ikey = greylock::document::generate_index_key_shard_number(index_base, shard_number);
 				std::string idata;
-				auto err = db.read(greylock::options::indexes_column, ikey, &idata);
+				auto err = sdb.read(greylock::options::indexes_column, ikey, &idata);
 				if (err) {
 					fprintf(stderr, "could not read index %s: %s [%d]\n",
 							ikey.c_str(), err.message().c_str(), err.code());
@@ -197,10 +209,10 @@ int main(int argc, char *argv[])
 
 
 				greylock::disk_index idx;
-				err = greylock::deserialize(idx, idata.data(), idata.size());
-				if (err) {
+				auto gerr = greylock::deserialize(idx, idata.data(), idata.size());
+				if (gerr) {
 					fprintf(stderr, "could not deserialize index %s, size: %ld: %s [%d]\n",
-							ikey.c_str(), idata.size(), err.message().c_str(), err.code());
+							ikey.c_str(), idata.size(), gerr.message().c_str(), gerr.code());
 					return err.code();
 				}
 

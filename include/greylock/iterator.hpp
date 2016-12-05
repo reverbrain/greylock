@@ -128,7 +128,7 @@ public:
 		std::string doc_data;
 		auto err = db.read(greylock::options::documents_column, m_idx_current->indexed_id.to_string(), &doc_data);
 		if (err)
-			return err;
+			return greylock::create_error(err.code(), "%s", err.message().c_str());
 
 		deserialize(*doc, doc_data.data(), doc_data.size());
 		return greylock::error_info();
