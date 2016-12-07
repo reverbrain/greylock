@@ -13,10 +13,12 @@ int main(int argc, char *argv[])
 
 	std::string input;
 	std::string column;
+	long rewind = 0;
 	generic.add_options()
 		("help", "This help message")
 		("column", bpo::value<std::string>(&column)->required(), "Column name to check")
 		("input", bpo::value<std::string>(&input)->required(), "Input rocksdb database")
+		("rewind", bpo::value<long>(&rewind)->default_value(0), "Number of documents to rewind (backwards if counting from the 'last' one)")
 		("last", "show last document")
 		;
 
@@ -57,8 +59,14 @@ int main(int argc, char *argv[])
 	auto it = db.iterator(column_id, rocksdb::ReadOptions());
 	if (vm.count("last")) {
 		it->SeekToLast();
+		while (rewind-- && it->Valid()) {
+			it->Prev();
+		}
 	} else {
 		it->SeekToFirst();
+		while (rewind-- && it->Valid()) {
+			it->Next();
+		}
 	}
 
 	if (!it->Valid()) {
@@ -66,6 +74,7 @@ int main(int argc, char *argv[])
 		std::cerr << "Iterator from database " << input << " is not valid: " << s.ToString() << " [" << s.code() << "]" << std::endl;
 		return -s.code();
 	}
+
 
 	auto key = it->key().ToString();
 	std::cout << "key: " << key << std::endl;
