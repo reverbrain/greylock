@@ -324,4 +324,18 @@ struct document {
 	}
 };
 
+std::string print_doc(const greylock::document &doc) {
+	std::ostringstream ss;
+
+	ss << "id: " << doc.id << ", author: " << doc.author;
+
+	ss << "\n          content: " << doc.ctx.content;
+	ss << "\n            title: " << doc.ctx.title;
+	ss << "\n            links: " << greylock::dump_vector(doc.ctx.links);
+	ss << "\n           images: " << greylock::dump_vector(doc.ctx.images);
+
+	return ss.str();
+}
+
+
 }} // namespace ioremap::greylock

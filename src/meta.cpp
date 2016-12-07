@@ -11,20 +11,6 @@
 
 using namespace ioremap;
 
-static inline const char *print_time(long tsec, long tnsec)
-{
-	char str[64];
-	struct tm tm;
-
-	static __thread char __dnet_print_time[128];
-
-	localtime_r((time_t *)&tsec, &tm);
-	strftime(str, sizeof(str), "%F %R:%S", &tm);
-
-	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) tnsec / 1000);
-	return __dnet_print_time;
-}
-
 int main(int argc, char *argv[])
 {
 	namespace bpo = boost::program_options;
@@ -108,31 +94,6 @@ int main(int argc, char *argv[])
 		}
 
 		ribosome::timer tm;
-
-		auto print_index = [&](const greylock::id_t &id) -> std::string {
-			long tsec, aux;
-			id.get_timestamp(&tsec, &aux);
-
-			std::ostringstream ss;
-			ss << id.to_string() <<
-				", raw_ts: " << id.timestamp <<
-				", aux: " << aux <<
-				", ts: " << print_time(tsec, 0);
-			return ss.str();
-		};
-
-		auto print_doc = [&](const greylock::document &doc) -> std::string {
-			std::ostringstream ss;
-
-			ss << "id: " << doc.id << ", author: " << doc.author;
-
-			ss << "\n          content: " << doc.ctx.content;
-			ss << "\n            title: " << doc.ctx.title;
-			ss << "\n            links: " << greylock::dump_vector(doc.ctx.links);
-			ss << "\n           images: " << greylock::dump_vector(doc.ctx.images);
-
-			return ss.str();
-		};
 
 		if (vm.count("index")) {
 			std::vector<std::string> cmp;
@@ -220,7 +181,7 @@ int main(int argc, char *argv[])
 				sidx.insert(idx.ids.begin(), idx.ids.end());
 
 				for (auto &id: idx.ids) {
-					std::cout << "indexed_id: " << print_index(id.indexed_id);
+					std::cout << "indexed_id: " << greylock::print_id(id.indexed_id);
 					if (dump) {
 						greylock::document doc;
 
@@ -240,7 +201,7 @@ int main(int argc, char *argv[])
 							return err.code();
 						}
 
-						std::cout << ", doc: " << print_doc(doc);
+						std::cout << ", doc: " << greylock::print_doc(doc);
 					}
 
 					std::cout << std::endl;
@@ -278,8 +239,8 @@ int main(int argc, char *argv[])
 				return err.code();
 			}
 
-			std::cout << "indexed_id: " << print_index(doc.indexed_id) <<
-				", doc: " << print_doc(doc) << std::endl;
+			std::cout << "indexed_id: " << greylock::print_id(doc.indexed_id) <<
+				", doc: " << greylock::print_doc(doc) << std::endl;
 		}
 
 		printf("Operation took %.2f seconds\n", tm.elapsed() / 1000.); 

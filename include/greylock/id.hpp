@@ -1,11 +1,14 @@
 #pragma once
 
 #include <string>
+#include <sstream>
 
 #include <stdint.h>
 #include <string.h>
 
 #include <msgpack.hpp>
+
+#include <time.h>
 
 namespace ioremap { namespace greylock {
 
@@ -70,7 +73,32 @@ struct id_t {
 	void set_next_id(const id_t &other) {
 		timestamp = other.timestamp + 1;
 	}
-
 };
+
+static inline const char *print_time(long tsec, long tnsec)
+{
+	char str[64];
+	struct tm tm;
+
+	static __thread char __dnet_print_time[128];
+
+	localtime_r((time_t *)&tsec, &tm);
+	strftime(str, sizeof(str), "%F %R:%S", &tm);
+
+	snprintf(__dnet_print_time, sizeof(__dnet_print_time), "%s.%06llu", str, (long long unsigned) tnsec / 1000);
+	return __dnet_print_time;
+}
+
+std::string print_id(const greylock::id_t &id) {
+	long tsec, aux;
+	id.get_timestamp(&tsec, &aux);
+
+	std::ostringstream ss;
+	ss << id.to_string() <<
+		", raw_ts: " << id.timestamp <<
+		", aux: " << aux <<
+		", ts: " << print_time(tsec, 0);
+	return ss.str();
+}
 
 }} // namespace ioremap::greylock
