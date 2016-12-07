@@ -35,7 +35,7 @@ int main(int argc, char *argv[])
 		("rocksdb.docs", bpo::value<std::string>(&dpath),
 		 	"path to rocksdb containing documents, "
 			"will be opened in read-only mode, safe to be called if different process is already using it")
-		("rocksdb.indexes", bpo::value<std::vector<std::string>>(&indexes_path)->required()->composing(),
+		("rocksdb.indexes", bpo::value<std::vector<std::string>>(&indexes_path)->composing(),
 		 	"path to rocksdb containing indexes, "
 			"will be opened in read-only mode, safe to be called if different process is already using it, "
 			"can be specified multiple times")
@@ -76,14 +76,12 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	try {
-		greylock::sharded_database sdb;
-		auto err = sdb.open_read_only(indexes_path, shards_path);
-		if (err) {
-			std::cerr << "could not open database: " << err.message() << std::endl;
-			return err.code();
-		}
+	if (vm.count("index") && !vm.count("rocksdb.indexes")) {
+		std::cerr << "You must provide index database when reading index\n" << cmdline_options << std::endl;
+		return -1;
+	}
 
+	try {
 		greylock::database db_docs;
 		if (dpath.size()) {
 			auto err = db_docs.open_read_only(dpath);
@@ -96,6 +94,13 @@ int main(int argc, char *argv[])
 		ribosome::timer tm;
 
 		if (vm.count("index")) {
+			greylock::sharded_database sdb;
+			auto err = sdb.open_read_only(indexes_path, shards_path);
+			if (err) {
+				std::cerr << "could not open database: " << err.message() << std::endl;
+				return err.code();
+			}
+
 			std::vector<std::string> cmp;
 			size_t pos = 0;
 			for (int i = 0; i < 2; ++i) {
@@ -130,7 +135,7 @@ int main(int argc, char *argv[])
 			std::string index_base = greylock::document::generate_index_base(greylock::options(), mbox, attr, token);
 			std::string skey = greylock::document::generate_shard_key(greylock::options(), mbox, attr, token);
 			std::vector<size_t> shards;
-			auto err = sdb.read_shards(skey, &shards);
+			err = sdb.read_shards(skey, &shards);
 			if (err) {
 				fprintf(stderr, "could not read shards %s: %s [%d]\n",
 						skey.c_str(), err.message().c_str(), err.code());
