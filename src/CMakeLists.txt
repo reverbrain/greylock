@@ -35,9 +35,12 @@ add_executable(greylock_compact compact.cpp)
 target_link_libraries(greylock_compact
 	greylock
 )
-
 add_executable(greylock_merge merge.cpp)
 target_link_libraries(greylock_merge
+	greylock
+)
+add_executable(greylock_show show.cpp)
+target_link_libraries(greylock_show
 	greylock
 )
 
@@ -53,6 +56,6 @@ target_link_libraries(greylock_ljsearch
 	${WARP_LIBRARIES}
 )
 
-install(TARGETS	greylock_server greylock_meta greylock_check greylock_compact greylock_merge
+install(TARGETS	greylock_server greylock_meta greylock_check greylock_compact greylock_merge greylock_show
 	RUNTIME DESTINATION bin COMPONENT runtime
 )
