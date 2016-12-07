@@ -1108,15 +1108,16 @@ int main(int argc, char *argv[])
 	cache_control cc;
 	long print_interval;
 	size_t shard_chunk_size = 10000;
+	int shard_start = 0;
 	size_t index_documents;
 	generic.add_options()
 		("help", "This help message")
 		("input", bpo::value<std::vector<std::string>>(&inputs)->composing(), "Livejournal dump files packed with bzip2")
 		("indexdb", bpo::value<std::string>(&indexdb), "Rocksdb database where livejournal posts are stored")
 		("output", bpo::value<std::string>(&output)->required(), "Output rocksdb database (when indexing, '.NNN suffix will be added)")
-		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("index-documents", bpo::value<size_t>(&index_documents)->default_value(100000000),
 			"Number of documents to be indexed and put into single output database")
+		("rewind", bpo::value<size_t>(&rewind), "Rewind input to this line number")
 		("rewind-doc", bpo::value<std::string>(&rewind_doc), "Rewind document iterator to this document id")
 		("threads", bpo::value<int>(&thread_num)->default_value(8), "Number of parser threads")
 		("alphabet", bpo::value<std::vector<std::string>>(&als)->composing(), "Allowed alphabet")
@@ -1129,6 +1130,7 @@ int main(int argc, char *argv[])
 			"Maximum number of documents parsed and cached per thread")
 		("index-shard-chunk-size", bpo::value<size_t>(&shard_chunk_size)->default_value(10000),
 			"Maximum number of documents in the shard chunk")
+		("index-shard-start", bpo::value<int>(&shard_start)->default_value(0), "Index shard start id")
 		("lang_stats", bpo::value<std::string>(&lang_path), "Language stats file")
 		("lang_model", bpo::value<std::vector<std::string>>(&lang_models)->composing(),
 			"Language models, format: language:model_path")
@@ -1346,16 +1348,15 @@ int main(int argc, char *argv[])
 
 		realtm.restart();
 
-		int output_database = 0;
 		while (it->Valid()) {
-			std::string output_name = output + "." + std::to_string(output_database);
+			std::string output_name = output + "." + std::to_string(shard_start);
 			auto err = parser.open(output_name);
 			if (err) {
 				std::cerr << "could not open output rocksdb database: " << err.message() << std::endl;
 				return err.code();
 			}
 
-			output_database++;
+			shard_start++;
 
 			size_t current_documents = 0;
 			size_t prev_shard_number = 0;
