@@ -128,7 +128,7 @@ int main(int argc, char *argv[])
 {
 	namespace bpo = boost::program_options;
 
-	bpo::options_description generic("Merge options");
+	bpo::options_description generic("Checker options");
 
 	std::string input;
 	std::string column;
