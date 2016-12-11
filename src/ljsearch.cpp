@@ -339,9 +339,6 @@ public:
 			generate_indexes(doc, token_indexes, token_shards);
 		}
 
-		size_t docs = m_docs.size();
-		m_docs.clear();
-
 		// time to create and join a thread is about 1ms on i7
 		std::thread shards_thread([&] () {
 			for (auto &p: token_shards) {
@@ -383,7 +380,7 @@ public:
 		if (err)
 			return err;
 
-		wstats->documents += docs;
+		wstats->documents += m_docs.size();
 		wstats->indexes += indexes;
 		wstats->shards += shards;
 		wstats->empty_authors += m_empty_authors;
