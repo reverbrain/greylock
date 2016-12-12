@@ -430,7 +430,7 @@ private:
 					auto sh = ts.find(t.shard_key);
 					if (sh == ts.end()) {
 						greylock::disk_token tmp;
-						tmp.shards.insert(tmp.shards.begin(), t.shards.begin(), t.shards.end());
+						tmp.shards.assign(t.shards.begin(), t.shards.end());
 						ts.insert(std::pair<std::string, greylock::disk_token>(t.shard_key, std::move(tmp)));
 					} else {
 						sh->second.shards.insert(sh->second.shards.end(), t.shards.begin(), t.shards.end());
