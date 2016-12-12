@@ -310,8 +310,8 @@ public:
 		return ret;
 	}
 
-	void index(greylock::document &&doc) {
-		m_docs.push_back(std::move(doc));
+	void index(const greylock::document &doc) {
+		m_docs.push_back(doc);
 	}
 
 	ribosome::error_info write_indexes(int worker_id, worker_stats *wstats) {
@@ -459,7 +459,7 @@ public:
 	}
 
 	~lj_worker() {
-		write_indexes();
+		write_cached_indexes();
 		m_serializer.sync();
 	}
 
@@ -469,7 +469,7 @@ public:
 		m_index_cache.clear();
 	}
 
-	ribosome::error_info write_indexes() {
+	ribosome::error_info write_cached_indexes() {
 		std::lock_guard<std::mutex> guard(m_lock);
 		return m_index_cache.write_indexes(m_worker_id, &m_wstats);
 	}
@@ -522,12 +522,13 @@ public:
 		ribosome::error_info err;
 
 		while (docs.size()) {
-			auto doc(std::move(docs.front()));
-			docs.pop_front();
+			auto &doc = docs.front();
 
-			err = process_one_document(std::move(doc));
+			err = process_one_document(doc);
 			if (err)
 				return err;
+
+			docs.pop_front();
 		}
 
 #if 0
@@ -537,13 +538,13 @@ public:
 #endif
 
 		if (cached_documents() > m_cc.index_cached_documents) {
-			err = write_indexes();
+			err = write_cached_indexes();
 		}
 
 		return err;
 	}
 
-	ribosome::error_info process_one_document(greylock::document &&doc) {
+	ribosome::error_info process_one_document(greylock::document &doc) {
 		ribosome::split spl;
 
 		auto fix_username = [] (const std::string &s) -> std::string {
@@ -657,7 +658,7 @@ public:
 		doc.idx.attributes.emplace_back(fc);
 		doc.idx.attributes.emplace_back(urls);
 
-		m_index_cache.index(std::move(doc));
+		m_index_cache.index(doc);
 
 		std::unique_lock<std::mutex> guard(m_lock);
 		m_wstats.lines++;
@@ -887,7 +888,7 @@ public:
 			t.join();
 		}
 
-		write_indexes();
+		write_all_indexes();
 		process_jobs(0);
 	}
 
@@ -1009,11 +1010,11 @@ public:
 		}
 	}
 
-	greylock::error_info write_indexes() {
-		// protect against write_indexes() running in parallel
+	greylock::error_info write_all_indexes() {
+		// protect against write_all_indexes() running in parallel
 		std::unique_lock<std::mutex> guard(m_sync_lock);
 		for (auto &w: m_workers) {
-			auto err = w->write_indexes();
+			auto err = w->write_cached_indexes();
 			if (err) {
 				return greylock::create_error(err.code(), "could not write indexes: %s", err.message().c_str());
 			}
@@ -1404,7 +1405,7 @@ int main(int argc, char *argv[])
 
 				// reopen shard, current document will be deserialized again and put into new db
 				if (++current_documents > index_documents && docs.empty()) {
-					parser.write_indexes();
+					parser.write_all_indexes();
 					parser.sync();
 					printf("%s: going to compact database %s\n", print_stats(parser.pstats()), output_name.c_str());
 					parser.compact();
@@ -1424,15 +1425,15 @@ int main(int argc, char *argv[])
 		}
 
 		//parser.sync_wait_completed();
-		parser.write_indexes();
+		parser.write_all_indexes();
 		parser.sync();
 		// it is possible that worker thread has grabbed the line, but hasn't yet process it
 		// give it some time to complete
 		sleep(1);
-		parser.write_indexes();
+		parser.write_all_indexes();
 		printf("\n%s\n", print_stats(parser.pstats()));
 
-		parser.write_indexes();
+		parser.write_all_indexes();
 		printf("%s\n", print_stats(parser.pstats()));
 
 		if (vm.count("compact")) {
