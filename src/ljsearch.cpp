@@ -339,18 +339,15 @@ public:
 			generate_indexes(doc, token_indexes, token_shards);
 		}
 
-		// time to create and join a thread is about 1ms on i7
-		std::thread shards_thread([&] () {
-			for (auto &p: token_shards) {
-				std::string sdt = serialize(p.second);
-				shards_batch.Merge(m_db.cfhandle(greylock::options::token_shards_column),
-						rocksdb::Slice(p.first), rocksdb::Slice(sdt));
-				shards_data_size += sdt.size();
-			}
+		for (auto &p: token_shards) {
+			std::string sdt = serialize(p.second);
+			shards_batch.Merge(m_db.cfhandle(greylock::options::token_shards_column),
+					rocksdb::Slice(p.first), rocksdb::Slice(sdt));
+			shards_data_size += sdt.size();
+		}
 
-			shards = shards_batch.Count();
-			shards_write_error = m_db.write(&shards_batch);
-		});
+		shards = shards_batch.Count();
+		shards_write_error = m_db.write(&shards_batch);
 
 
 		for (auto &p: token_indexes) {
@@ -363,7 +360,6 @@ public:
 		indexes = indexes_batch.Count();
 		indexes_write_error = m_db.write(&indexes_batch);
 
-		shards_thread.join();
 
 		if (indexes_write_error) {
 			return ribosome::create_error(indexes_write_error.code(), "could not write indexes: %s",
