@@ -262,8 +262,7 @@ public:
 			}
 		}
 
-		index.ids.clear();
-		index.ids.insert(index.ids.end(), unique_index.begin(), unique_index.end());
+		index.ids.assign(unique_index.begin(), unique_index.end());
 		*new_value = serialize(index);
 
 		if (new_value->size() > 1024 * 1024) {
@@ -350,7 +349,7 @@ public:
 			shards.insert(s.shards.begin(), s.shards.end());
 		}
 
-		dt.shards = std::vector<size_t>(shards.begin(), shards.end());
+		dt.shards.assign(shards.begin(), shards.end());
 		*new_value = serialize(dt);
 
 		if (new_value->size() > 1024 * 1024) {
