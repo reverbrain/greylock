@@ -348,8 +348,6 @@ public:
 				shards_data_size += sdt.size();
 			}
 
-			token_shards.clear();
-
 			shards = shards_batch.Count();
 			shards_write_error = m_db.write(&shards_batch);
 		});
