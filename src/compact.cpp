@@ -104,12 +104,12 @@ int main(int argc, char *argv[])
 			long compaction_tmp_start_time = tm.elapsed();
 
 			long current_size = 0;
-			rocksdb::Slice start, end;
+			std::string start, end;
 
-			start = it->key();
+			start = it->key().ToString();
 			while (it->Valid() && current_size < compact_size) {
 				current_size += it->value().size();
-				end = it->key();
+				end = it->key().ToString();
 
 				it->Next();
 			}
@@ -119,7 +119,7 @@ int main(int argc, char *argv[])
 
 			printf("%.2fs : %.2fs: compaction: start: %s, end: %s, size: %.2f MB\n",
 					SECONDS(tm.elapsed()), SECONDS(compaction_time),
-					start.ToString().c_str(), end.ToString().c_str(),
+					start.c_str(), end.c_str(),
 					current_size / (1024. * 1024.)); 
 		}
 
