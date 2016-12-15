@@ -83,13 +83,13 @@ int main(int argc, char *argv[])
 			return err.code();
 		}
 		long open_time = tm.elapsed();
-		printf("%.2fs : %.2fs: database has been opened\n", SECONDS(tm.elapsed()), SECONDS(open_time)); 
+		printf("%.2fs : %.2fs: database %s has been opened\n", SECONDS(tm.elapsed()), SECONDS(open_time), dpath.c_str());
 
 		rocksdb::ReadOptions ro;
 		auto it = db.iterator(column_id, ro);
 		it->SeekToFirst();
 		long position_time = tm.elapsed() - open_time;
-		printf("%.2fs : %.2fs: database has been positioned\n", SECONDS(tm.elapsed()), SECONDS(position_time));
+		printf("%.2fs : %.2fs: database %s has been positioned\n", SECONDS(tm.elapsed()), SECONDS(position_time), dpath.c_str());
 
 		if (!it->Valid()) {
 			auto s = it->status();
@@ -117,8 +117,8 @@ int main(int argc, char *argv[])
 			db.compact(column_id, start, end);
 			long compaction_time = tm.elapsed() - compaction_tmp_start_time;
 
-			printf("%.2fs : %.2fs: compaction: start: %s, end: %s, size: %.2f MB\n",
-					SECONDS(tm.elapsed()), SECONDS(compaction_time),
+			printf("%.2fs : %.2fs: %s: compaction: start: %s, end: %s, size: %.2f MB\n",
+					SECONDS(tm.elapsed()), SECONDS(compaction_time), dpath.c_str(),
 					start.c_str(), end.c_str(),
 					current_size / (1024. * 1024.)); 
 		}
@@ -133,7 +133,7 @@ int main(int argc, char *argv[])
 
 		long compaction_time = tm.elapsed() - compaction_start_time;
 
-		printf("%.2fs : %.2fs: database has been compacted\n", SECONDS(tm.elapsed()), SECONDS(compaction_time));
+		printf("%.2fs : %.2fs: database %s has been compacted\n", SECONDS(tm.elapsed()), SECONDS(compaction_time), dpath.c_str());
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
 	}
