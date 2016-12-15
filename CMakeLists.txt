@@ -20,6 +20,7 @@ LOCATE_LIBRARY(JEMALLOC "jemalloc/jemalloc.h" "jemalloc")
 LOCATE_LIBRARY(MSGPACK "msgpack.hpp" "msgpack")
 LOCATE_LIBRARY(THEVOID "thevoid/server.hpp" "thevoid")
 LOCATE_LIBRARY(SWARM "swarm/http_request.hpp" "swarm")
+LOCATE_LIBRARY(RIBOSOME "ribosome/timer.hpp" "ribosome")
 LOCATE_LIBRARY(ROCKSDB "rocksdb/db.h" "rocksdb")
 LOCATE_LIBRARY(WARP "warp/stem.hpp" "warp_stem")
 
