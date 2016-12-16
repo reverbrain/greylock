@@ -39,8 +39,9 @@ int main(int argc, char *argv[])
 	bpo::options_description gr("Compaction options");
 	gr.add_options()
 		("path", bpo::value<std::string>(&dpath)->required(), "path to rocksdb database")
-		("column", bpo::value<std::string>(&cname)->required(), "Column name to compact")
-		("size", bpo::value<long>(&csize_mb)->default_value(1024), "Number of MBs to compact in one chunk")
+		("column", bpo::value<std::string>(&cname)->required(), "column name to compact")
+		("size", bpo::value<long>(&csize_mb)->default_value(1024), "number of MBs to compact in one chunk")
+		("full", "full compaction")
 		;
 
 	bpo::options_description cmdline_options;
@@ -84,51 +85,56 @@ int main(int argc, char *argv[])
 		}
 		long open_time = tm.elapsed();
 		printf("%.2fs : %.2fs: database %s has been opened\n", SECONDS(tm.elapsed()), SECONDS(open_time), dpath.c_str());
-
-		rocksdb::ReadOptions ro;
-		auto it = db.iterator(column_id, ro);
-		it->SeekToFirst();
-		long position_time = tm.elapsed() - open_time;
-		printf("%.2fs : %.2fs: database %s has been positioned\n", SECONDS(tm.elapsed()), SECONDS(position_time), dpath.c_str());
-
-		if (!it->Valid()) {
-			auto s = it->status();
-			fprintf(stderr, "iterator is not valid: %s [%d]", s.ToString().c_str(), s.code());
-			return -s.code();
-		}
-
-		long compact_size = csize_mb * 1024 * 1024;
-
 		long compaction_start_time = tm.elapsed();
-		while (it->Valid()) {
-			long compaction_tmp_start_time = tm.elapsed();
 
-			long current_size = 0;
-			std::string start, end;
+		if (!vm.count("full")) {
+			rocksdb::ReadOptions ro;
+			auto it = db.iterator(column_id, ro);
+			it->SeekToFirst();
+			long position_time = tm.elapsed() - open_time;
+			printf("%.2fs : %.2fs: database %s has been positioned\n", SECONDS(tm.elapsed()), SECONDS(position_time), dpath.c_str());
 
-			start = it->key().ToString();
-			while (it->Valid() && current_size < compact_size) {
-				current_size += it->value().size();
-				end = it->key().ToString();
-
-				it->Next();
-			}
-
-			db.compact(column_id, start, end);
-			long compaction_time = tm.elapsed() - compaction_tmp_start_time;
-
-			printf("%.2fs : %.2fs: %s: compaction: start: %s, end: %s, size: %.2f MB\n",
-					SECONDS(tm.elapsed()), SECONDS(compaction_time), dpath.c_str(),
-					start.c_str(), end.c_str(),
-					current_size / (1024. * 1024.)); 
-		}
-
-		if (!it->Valid()) {
-			auto s = it->status();
-			if (s.code() != 0) {
-				fprintf(stderr, "iterator has become invalid during iteration: %s [%d]", s.ToString().c_str(), s.code());
+			if (!it->Valid()) {
+				auto s = it->status();
+				fprintf(stderr, "iterator is not valid: %s [%d]", s.ToString().c_str(), s.code());
 				return -s.code();
 			}
+
+			long compact_size = csize_mb * 1024 * 1024;
+
+			compaction_start_time = tm.elapsed();
+			while (it->Valid()) {
+				long compaction_tmp_start_time = tm.elapsed();
+
+				long current_size = 0;
+				std::string start, end;
+
+				start = it->key().ToString();
+				while (it->Valid() && current_size < compact_size) {
+					current_size += it->value().size();
+					end = it->key().ToString();
+
+					it->Next();
+				}
+
+				db.compact(column_id, start, end);
+				long compaction_time = tm.elapsed() - compaction_tmp_start_time;
+
+				printf("%.2fs : %.2fs: %s: compaction: start: %s, end: %s, size: %.2f MB\n",
+						SECONDS(tm.elapsed()), SECONDS(compaction_time), dpath.c_str(),
+						start.c_str(), end.c_str(),
+						current_size / (1024. * 1024.)); 
+			}
+
+			if (!it->Valid()) {
+				auto s = it->status();
+				if (s.code() != 0) {
+					fprintf(stderr, "iterator has become invalid during iteration: %s [%d]", s.ToString().c_str(), s.code());
+					return -s.code();
+				}
+			}
+		} else {
+			db.compact();
 		}
 
 		long compaction_time = tm.elapsed() - compaction_start_time;
