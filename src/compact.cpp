@@ -139,7 +139,9 @@ int main(int argc, char *argv[])
 
 		long compaction_time = tm.elapsed() - compaction_start_time;
 
-		printf("%.2fs : %.2fs: database %s has been compacted\n", SECONDS(tm.elapsed()), SECONDS(compaction_time), dpath.c_str());
+		printf("%.2fs : %.2fs: database %s has been %s compacted\n",
+				SECONDS(tm.elapsed()), SECONDS(compaction_time), dpath.c_str(),
+				vm.count("full") ? "fully" : "");
 	} catch (const std::exception &e) {
 		std::cerr << "Exception: " << e.what() << std::endl;
 	}
